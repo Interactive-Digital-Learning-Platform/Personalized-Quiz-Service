@@ -1,0 +1,31 @@
+version: "3.9"
+
+# ── Services ──────────────────────────────────────────────────────────────────
+# Note: No database service is defined here because we use Neon (serverless
+# PostgreSQL). The DATABASE_URL in the .env file points directly to Neon.
+services:
+  api:
+    # Build the image from the Dockerfile in the current directory
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    # Map host port 8000 to container port 8000
+    ports:
+      - "8000:8000"
+
+    # Load all environment variables from the .env file
+    # Never hard-code secrets — they live in .env
+    env_file:
+      - .env
+
+    # Restart the container automatically if it crashes
+    restart: unless-stopped
+
+    # Override the CMD for development: add --reload for hot reloading.
+    # In production, remove the `command` key entirely to use the Dockerfile CMD.
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+    # Mount source code into the container for hot reload in dev
+    volumes:
+      - .:/app
