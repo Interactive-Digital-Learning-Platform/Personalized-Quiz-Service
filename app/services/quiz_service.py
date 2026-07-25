@@ -3,11 +3,20 @@ services/quiz_service.py
 ────────────────────────
 Business logic for the quiz generation and submission flow.
 
-Key responsibility: DB-first caching strategy for `generate_quiz`.
+Key responsibility: AI-first generation for `generate_quiz`.
 
-Before calling the expensive Groq API, we check if enough questions for the
-requested (subject, lesson, difficulty) combination already exist in the DB.
-If they do, we return them immediately — saving latency and API cost.
+Every call to `/quiz/generate` triggers a fresh Groq API call so the user
+always gets new questions. The DB question pool is only used as a fallback
+when the AI call fails, or when the caller explicitly requests the cached
+fallback via `force_cache` (used after a prior AI failure was shown in the UI).
+
+The caller only needs to supply `subject` and `question_count`. Lesson and
+difficulty are both chosen automatically:
+- Lesson: each question is independently assigned a different, randomly
+  varied lesson within the subject by the AI (see groq_service.generate_questions) —
+  quizzes are NOT pinned to one pre-selected topic.
+- Difficulty: read from `difficulty_service`'s accuracy history.
+Both remain overridable if the caller explicitly supplies them.
 """
 import logging
 from collections import defaultdict
@@ -20,6 +29,7 @@ from app.models.quiz_session import QuizSession, QuestionAttempt
 from app.models.quiz_tracking import QuizCompletion, QuizProgressSnapshot
 from app.models.user import User
 from app.schemas.quiz import GenerateQuizRequest, SaveProgressRequest, SubmitQuizRequest
+from app.services import difficulty_service
 from app.services.groq_service import generate_questions
 
 logger = logging.getLogger(__name__)
@@ -54,6 +64,32 @@ def _serialize_question(question: Question) -> dict:
         "difficulty": question.difficulty,
         "correct_answer": question.correct_answer,
     }
+
+
+async def _get_recent_lessons(
+    db: AsyncSession, user_id: int, subject: str, limit: int = 6
+) -> list[str]:
+    """
+    Distinct lessons this user was recently quizzed on for this subject, most
+    recent first. Passed to `generate_questions()` as `avoid_lessons` so
+    repeated "just pick a subject" requests get lesson variety across sessions,
+    not just within one quiz's random per-question assignment.
+    """
+    stmt = (
+        select(QuizSession.lesson)
+        .where(QuizSession.user_id == user_id, QuizSession.subject == subject)
+        .order_by(QuizSession.created_at.desc())
+        .limit(limit * 3)  # over-fetch before de-duping, since sessions repeat lessons
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+
+    seen: list[str] = []
+    for lesson in rows:
+        if lesson and lesson != "Mixed" and lesson not in seen:
+            seen.append(lesson)
+        if len(seen) >= limit:
+            break
+    return seen
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -114,55 +150,180 @@ async def get_or_create_user(db: AsyncSession, clerk_id: str) -> User:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. QUIZ GENERATION (with DB-first caching)
+# 1. QUIZ GENERATION (AI-first, DB cache is a failure fallback only)
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def generate_quiz(
     db: AsyncSession,
     clerk_id: str,
     payload: GenerateQuizRequest,
-) -> tuple[QuizSession, list[Question], bool]:
+) -> tuple[QuizSession, list[Question], bool, str, str]:
     """
     Generate a quiz session with questions.
 
-    Strategy (DB-first caching):
-    ─────────────────────────────
-    1. Query the `questions` table for rows matching (subject, lesson, difficulty).
-    2. If we have >= `question_count` cached rows, sample them randomly.
-    3. Otherwise, call Groq API and save the new questions to the DB.
+    Strategy (AI-first):
+    ─────────────────────
+    1. Always call the Groq API to generate a fresh set of questions, so every
+       quiz a user takes is genuinely new — never silently served from the DB.
+    2. Only fall back to the `questions` table (subject, lesson, difficulty)
+       cache if the AI call fails outright (network error, malformed output,
+       etc.), or if the caller explicitly passes `force_cache=True` (the
+       user-triggered fallback after seeing an AI failure in the UI).
+
+    Lesson and difficulty are both AI/system-chosen by default — the caller
+    only needs to supply `subject` and `question_count`:
+    - `lesson`: if omitted (the default), each question is independently
+      assigned a different, randomly varied lesson within the subject by the
+      AI itself as part of the same generation call — the quiz is NOT pinned
+      to one pre-selected topic. Pass `lesson` explicitly to force every
+      question onto one specific topic instead (manual override).
+    - `difficulty`: if omitted, `difficulty_service` reads accuracy history and
+      promotes/demotes it over time — per (subject, lesson) if a single lesson
+      was given, or per (subject) overall otherwise (`SubjectMastery`), since
+      there's no single lesson to look up when lessons vary per question. This
+      is what makes e.g. a student's Maths quizzes gradually get harder while
+      their Science quizzes stay easy — tracked independently per subject.
 
     Returns:
-        (session, questions, cache_hit)
+        (session, questions, cache_hit, difficulty, lesson)
         - session: the newly created QuizSession ORM object
         - questions: list of Question ORM objects
-        - cache_hit: True if we served from DB cache
+        - cache_hit: True if we served from DB cache (AI failed or force_cache)
+        - difficulty: the difficulty level actually used
+        - lesson: the session-level lesson label — the fixed lesson if one was
+          given/used, "Mixed" if the questions span multiple lessons, or the
+          single common lesson if they all happen to share one
     """
+    from fastapi import HTTPException, status
+
     user = await get_or_create_user(db, clerk_id)
 
-    # ── Step 1: Check DB cache (excluding already-seen questions) ─────────────
+    # None (the default) means: let the AI assign a different, random lesson
+    # to each question within the subject, instead of pinning the whole quiz
+    # to one pre-selected topic.
+    lesson: str | None = payload.lesson
+
+    difficulty = payload.difficulty or (
+        await difficulty_service.get_current_difficulty(db, user.id, payload.subject, lesson)
+        if lesson is not None
+        else await difficulty_service.get_subject_difficulty(db, user.id, payload.subject)
+    )
+
     exclude_ids: list[int] = payload.excluded_question_ids or []
 
     base_filter = [
         Question.subject == payload.subject,
-        Question.lesson == payload.lesson,
-        Question.difficulty == payload.difficulty,
+        Question.difficulty == difficulty,
     ]
+    if lesson is not None:
+        base_filter.append(Question.lesson == lesson)
     if exclude_ids:
         base_filter.append(Question.id.notin_(exclude_ids))
 
-    cache_count_stmt = select(func.count(Question.id)).where(*base_filter)
-    cached_count: int = (await db.execute(cache_count_stmt)).scalar_one()
-
     # force_cache=True means the user explicitly chose the DB fallback after AI failed
-    cache_hit = payload.force_cache or (cached_count >= payload.question_count)
-    logger.info(
-        "Cache check: subject=%s, lesson=%s, difficulty=%s — found %d unseen, need %d → cache_hit=%s (force=%s, excluded %d ids)",
-        payload.subject, payload.lesson, payload.difficulty,
-        cached_count, payload.question_count, cache_hit, payload.force_cache, len(exclude_ids),
-    )
+    cache_hit = payload.force_cache
+    ai_failed = False
+
+    if not cache_hit:
+        # ── Step 1: Call Groq, dedup against DB, retry until we have enough ───
+        try:
+            # Fetch all existing question texts for this topic so the prompt can
+            # explicitly exclude them and the AI generates genuinely new content.
+            # When lesson is None (random per-question mode), this spans the
+            # whole subject rather than one topic.
+            existing_texts_filter = [
+                Question.subject == payload.subject,
+                Question.difficulty == difficulty,
+            ]
+            if lesson is not None:
+                existing_texts_filter.append(Question.lesson == lesson)
+            existing_texts_stmt = select(Question.question).where(*existing_texts_filter)
+            existing_texts: list[str] = list(
+                (await db.execute(existing_texts_stmt)).scalars().all()
+            )
+
+            # Only meaningful in random-lesson mode — encourages variety across
+            # separate quiz generations, not just within one quiz's batch.
+            recent_lessons = (
+                await _get_recent_lessons(db, user.id, payload.subject)
+                if lesson is None
+                else []
+            )
+
+            needed = payload.question_count
+            deduped_ai: list[dict] = []
+            # Grows with every accepted question so within-batch duplicates are also caught
+            seen_texts: list[str] = list(existing_texts)
+            max_attempts = 3
+
+            for attempt in range(max_attempts):
+                remaining = needed - len(deduped_ai)
+                if remaining <= 0:
+                    break
+
+                batch = await generate_questions(
+                    grade=payload.grade,
+                    subject=payload.subject,
+                    lesson=lesson,
+                    difficulty=difficulty,
+                    question_count=remaining,
+                    existing_questions=seen_texts,
+                    avoid_lessons=recent_lessons,
+                )
+
+                added = 0
+                for q in batch:
+                    q_text = q["question"]
+                    if not _is_near_duplicate(q_text, seen_texts):
+                        deduped_ai.append(q)
+                        seen_texts.append(q_text)
+                        added += 1
+                    else:
+                        logger.info("Dedup: discarded near-duplicate question (attempt %d)", attempt + 1)
+
+                logger.info(
+                    "Dedup attempt %d/%d: +%d accepted, %d total, %d still needed",
+                    attempt + 1, max_attempts, added, len(deduped_ai), needed - len(deduped_ai),
+                )
+
+            # Use however many unique questions we got (may be < needed if topic is narrow)
+            ai_data = deduped_ai or (await generate_questions(
+                grade=payload.grade,
+                subject=payload.subject,
+                lesson=lesson,
+                difficulty=difficulty,
+                question_count=needed,
+                avoid_lessons=recent_lessons,
+            ))
+
+            questions: list[Question] = []
+            for q_data in ai_data:
+                question = Question(
+                    question=q_data["question"],
+                    options=q_data["options"],
+                    correct_answer=q_data["correct_answer"],
+                    subject=payload.subject,
+                    # Fixed lesson mode: same lesson for every question.
+                    # Random mode: each question keeps its own AI-assigned lesson.
+                    lesson=lesson if lesson is not None else q_data["lesson"],
+                    difficulty=difficulty,
+                )
+                db.add(question)
+                questions.append(question)
+
+            # Flush to get DB-assigned IDs before creating the session
+            await db.flush()
+
+        except HTTPException as exc:
+            logger.warning(
+                "AI generation failed for subject=%s, lesson=%s, difficulty=%s — falling back to DB cache: %s",
+                payload.subject, lesson or "<random per question>", difficulty, exc.detail,
+            )
+            ai_failed = True
+            cache_hit = True
 
     if cache_hit:
-        # ── Step 2a: Fetch from cache, random sample of unseen questions ──────
+        # ── Step 2: Fetch from cache, random sample of unseen questions ───────
         cached_stmt = (
             select(Question)
             .where(*base_filter)
@@ -170,87 +331,41 @@ async def generate_quiz(
             .limit(payload.question_count)
         )
         result = await db.execute(cached_stmt)
-        questions: list[Question] = list(result.scalars().all())
+        questions = list(result.scalars().all())
 
+        if not questions and ai_failed:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="AI question generation failed and no cached questions are available for this topic yet.",
+            )
+
+        logger.info(
+            "Served from DB cache: subject=%s, lesson=%s, difficulty=%s — %d questions (ai_failed=%s, force=%s)",
+            payload.subject, lesson or "<any>", difficulty,
+            len(questions), ai_failed, payload.force_cache,
+        )
+
+    # ── Determine the session-level lesson label ───────────────────────────────
+    # If a single lesson was given/used, that's the label. Otherwise (random
+    # per-question mode, or a lesson-agnostic cache fallback), derive a label
+    # from whatever lessons the served questions actually belong to.
+    if lesson is not None:
+        session_lesson = lesson
     else:
-        # ── Step 2b: Call Groq, dedup against DB, retry until we have enough ───
-        # Fetch all existing question texts for this topic so the prompt can
-        # explicitly exclude them and the AI generates genuinely new content.
-        existing_texts_stmt = select(Question.question).where(
-            Question.subject == payload.subject,
-            Question.lesson == payload.lesson,
-            Question.difficulty == payload.difficulty,
-        )
-        existing_texts: list[str] = list(
-            (await db.execute(existing_texts_stmt)).scalars().all()
-        )
-
-        needed = payload.question_count
-        deduped_ai: list[dict] = []
-        # Grows with every accepted question so within-batch duplicates are also caught
-        seen_texts: list[str] = list(existing_texts)
-        max_attempts = 3
-
-        for attempt in range(max_attempts):
-            remaining = needed - len(deduped_ai)
-            if remaining <= 0:
-                break
-
-            batch = await generate_questions(
-                grade=payload.grade,
-                subject=payload.subject,
-                lesson=payload.lesson,
-                difficulty=payload.difficulty,
-                question_count=remaining,
-                existing_questions=seen_texts,
-            )
-
-            added = 0
-            for q in batch:
-                q_text = q["question"]
-                if not _is_near_duplicate(q_text, seen_texts):
-                    deduped_ai.append(q)
-                    seen_texts.append(q_text)
-                    added += 1
-                else:
-                    logger.info("Dedup: discarded near-duplicate question (attempt %d)", attempt + 1)
-
-            logger.info(
-                "Dedup attempt %d/%d: +%d accepted, %d total, %d still needed",
-                attempt + 1, max_attempts, added, len(deduped_ai), needed - len(deduped_ai),
-            )
-
-        # Use however many unique questions we got (may be < needed if topic is narrow)
-        ai_data = deduped_ai or (await generate_questions(
-            grade=payload.grade,
-            subject=payload.subject,
-            lesson=payload.lesson,
-            difficulty=payload.difficulty,
-            question_count=needed,
-        ))
-
-        questions = []
-        for q_data in ai_data:
-            question = Question(
-                question=q_data["question"],
-                options=q_data["options"],
-                correct_answer=q_data["correct_answer"],
-                subject=payload.subject,
-                lesson=payload.lesson,
-                difficulty=payload.difficulty,
-            )
-            db.add(question)
-            questions.append(question)
-
-        # Flush to get DB-assigned IDs before creating the session
-        await db.flush()
+        distinct_lessons = {q.lesson for q in questions}
+        if len(distinct_lessons) == 1:
+            session_lesson = next(iter(distinct_lessons))
+        elif distinct_lessons:
+            session_lesson = "Mixed"
+        else:
+            session_lesson = payload.subject
 
     # ── Step 3: Create a new QuizSession ──────────────────────────────────────
     session = QuizSession(
         user_id=user.id,
         subject=payload.subject,
-        lesson=payload.lesson,
-        difficulty=payload.difficulty,
+        lesson=session_lesson,
+        difficulty=difficulty,
         question_count=len(questions),
         questions_snapshot=[_serialize_question(question) for question in questions],
     )
@@ -258,15 +373,19 @@ async def generate_quiz(
     await db.commit()
     await db.refresh(session)
 
-    # Refresh questions to ensure IDs are loaded (important after flush)
-    for q in questions:
-        await db.refresh(q)
+    # NOTE: no per-question refresh here on purpose. Every Question object
+    # already has its `id` populated (via the `db.flush()` RETURNING clause
+    # for newly-created rows, or already-loaded from the cache SELECT), and
+    # every other field was set explicitly at construction/fetch time. A
+    # refresh-per-question loop here used to add one DB round-trip per
+    # question — with Neon's network latency that alone added several
+    # seconds per quiz for no benefit.
 
     logger.info(
-        "Created QuizSession id=%d for user=%d with %d questions",
-        session.id, user.id, len(questions),
+        "Created QuizSession id=%d for user=%d with %d questions at lesson=%s, difficulty=%s",
+        session.id, user.id, len(questions), session_lesson, difficulty,
     )
-    return session, questions, cache_hit
+    return session, questions, cache_hit, difficulty, session_lesson
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -422,6 +541,28 @@ async def submit_quiz(
         "Quiz session %d submitted: %d/%d correct, accuracy=%.1f%%, total_time=%.1fs",
         session.id, correct_count, total_questions, accuracy, total_time,
     )
+
+    # ── Adaptive difficulty: feed this quiz's results back in ──────────────────
+    # Non-critical — a failure here should never break the submission response.
+    # Subject-level: drives the default random-lesson quiz flow, using overall
+    # accuracy (this is what makes e.g. Maths gradually get harder while
+    # Science stays easy, independently per subject).
+    # Lesson-level: drives the narrower explicit-lesson-override flow.
+    try:
+        await difficulty_service.update_subject_mastery_after_submission(
+            db=db,
+            user_id=user.id,
+            subject=session.subject,
+            accuracy=accuracy,
+        )
+        await difficulty_service.update_mastery_after_submission(
+            db=db,
+            user_id=user.id,
+            subject=session.subject,
+            lesson_accuracy_breakdown=lesson_accuracy_breakdown,
+        )
+    except Exception as exc:
+        logger.error("Difficulty mastery update failed (non-critical): %s", exc)
 
     return {
         "session_id": session.id,

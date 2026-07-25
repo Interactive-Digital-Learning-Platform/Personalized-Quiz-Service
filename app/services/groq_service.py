@@ -5,7 +5,10 @@ All interactions with the Groq API are centralised here.
 
 Two responsibilities:
 1. `generate_questions()` — Given quiz parameters, return a structured list of
-   MCQ questions by prompting Groq's LLaMA 3 70B model.
+   MCQ questions by prompting Groq's LLaMA 3 70B model. When no `lesson` is
+   given, each question is independently assigned a different, randomly
+   varied lesson/topic within the subject — quizzes are NOT pinned to one
+   pre-selected lesson.
 2. `generate_feedback()` — Given a user's analytics summary, return personalised
    AI study suggestions.
 
@@ -40,28 +43,42 @@ _groq_client = AsyncGroq(api_key=settings.GROQ_API_KEY)
 async def generate_questions(
     grade: int,
     subject: str,
-    lesson: str,
     difficulty: str,
     question_count: int,
+    lesson: str | None = None,
     existing_questions: list[str] | None = None,
+    avoid_lessons: list[str] | None = None,
 ) -> list[dict]:
     """
     Call Groq to generate `question_count` multiple-choice questions.
 
+    `lesson` — if given, EVERY question is drawn from this one specific topic
+    (manual override / narrow practice mode). If omitted (the default), each
+    question is independently assigned a DIFFERENT, randomly varied lesson
+    from across the subject's syllabus — quizzes are NOT pinned to a single
+    pre-selected lesson.
+
     `existing_questions` — texts of questions already in the DB for this
-    subject/lesson/difficulty. Passed to the model so it can explicitly
-    avoid repeating them.
+    subject (+ lesson, if fixed) at this difficulty. Passed to the model so it
+    can explicitly avoid repeating them.
+
+    `avoid_lessons` — only used when `lesson` is None. Lessons this user was
+    recently quizzed on for this subject, so repeated generations get lesson
+    variety across sessions too, not just within one quiz.
 
     Returns a list of dicts, each with:
         - question (str)
         - options (list[str])       — exactly 4 choices
         - correct_answer (str)      — must be one of the options exactly
         - explanation (str)         — brief explanation for the correct answer
+        - lesson (str)              — the specific lesson/topic this question covers
 
     Raises:
         HTTPException(502) if the Groq API fails or returns malformed JSON.
     """
     existing_questions = existing_questions or []
+    avoid_lessons = avoid_lessons or []
+    random_lessons = lesson is None
 
     # ── System prompt: define the strict JSON contract ────────────────────────
     system_prompt = """You are an expert educational content creator for Sri Lankan school students.
@@ -74,7 +91,8 @@ CRITICAL: You MUST respond with ONLY a valid JSON object in exactly this structu
       "question": "The full question text here?",
       "options": ["Option A", "Option B", "Option C", "Option D"],
       "correct_answer": "Option A",
-      "explanation": "Brief explanation of why this is correct."
+      "explanation": "Brief explanation of why this is correct.",
+      "lesson": "The specific lesson/topic this question covers"
     }
   ]
 }
@@ -99,6 +117,9 @@ QUALITY RULES:
 - correct_answer must be EXACTLY one of the 4 options (copy it verbatim).
 - All 4 options must be plausible — avoid obviously wrong distractors.
 - Questions must be appropriate for the specified grade level.
+- The "lesson" field must always be a real, specific topic name from the
+  subject's standard syllabus (e.g. "Algebra", "Photosynthesis") — never the
+  subject name itself and never generic ("General", "Miscellaneous", etc).
 - Do NOT include numbering in the question text.
 - Do NOT output anything outside the JSON object.
 """
@@ -115,24 +136,53 @@ QUALITY RULES:
             f"{exclusion_lines}\n"
         )
 
-    user_prompt = (
-        f"[Request ID: {seed_context}]\n\n"
-        f"Generate {question_count} UNIQUE {difficulty}-difficulty multiple-choice questions "
-        f"for Grade {grade} Sri Lankan students.\n"
-        f"Subject: {subject}\n"
-        f"Lesson / Topic: {lesson}\n"
-        f"{exclusion_block}\n"
-        f"Requirements:\n"
-        f"- Cover {question_count} DIFFERENT aspects or sub-concepts within '{lesson}'.\n"
-        f"- Use a variety of question styles (factual, applied, scenario, comparison, cause-effect).\n"
-        f"- Each question must be clearly distinct from all others in this set.\n\n"
-        f"Return exactly {question_count} questions in the required JSON format."
-    )
+    if random_lessons:
+        avoid_lessons_block = ""
+        if avoid_lessons:
+            avoid_lines = "\n".join(f"- {l}" for l in avoid_lessons[:10])
+            avoid_lessons_block = (
+                f"\n\nThis student was recently quizzed on these lessons for this subject — "
+                f"prefer OTHER lessons where possible for variety:\n{avoid_lines}\n"
+            )
+
+        user_prompt = (
+            f"[Request ID: {seed_context}]\n\n"
+            f"Generate {question_count} UNIQUE {difficulty}-difficulty multiple-choice questions "
+            f"for Grade {grade} Sri Lankan students.\n"
+            f"Subject: {subject}\n"
+            f"{exclusion_block}"
+            f"{avoid_lessons_block}\n"
+            f"Requirements:\n"
+            f"- Do NOT focus on a single lesson. EACH question must come from a DIFFERENT, "
+            f"randomly chosen lesson/topic within the full '{subject}' syllabus for this grade.\n"
+            f"- Spread the {question_count} questions across the breadth of the subject — "
+            f"avoid picking the same lesson for more than one question unless the subject "
+            f"genuinely has too few lessons to avoid it.\n"
+            f"- Set each question's \"lesson\" field to the specific topic IT individually covers.\n"
+            f"- Use a variety of question styles (factual, applied, scenario, comparison, cause-effect).\n"
+            f"- Each question must be clearly distinct from all others in this set.\n\n"
+            f"Return exactly {question_count} questions in the required JSON format."
+        )
+    else:
+        user_prompt = (
+            f"[Request ID: {seed_context}]\n\n"
+            f"Generate {question_count} UNIQUE {difficulty}-difficulty multiple-choice questions "
+            f"for Grade {grade} Sri Lankan students.\n"
+            f"Subject: {subject}\n"
+            f"Lesson / Topic: {lesson}\n"
+            f"{exclusion_block}\n"
+            f"Requirements:\n"
+            f"- Cover {question_count} DIFFERENT aspects or sub-concepts within '{lesson}'.\n"
+            f"- Set every question's \"lesson\" field to exactly \"{lesson}\".\n"
+            f"- Use a variety of question styles (factual, applied, scenario, comparison, cause-effect).\n"
+            f"- Each question must be clearly distinct from all others in this set.\n\n"
+            f"Return exactly {question_count} questions in the required JSON format."
+        )
 
     try:
         logger.info(
             "Calling Groq API: model=%s, subject=%s, lesson=%s, count=%d, excluding=%d existing",
-            settings.GROQ_MODEL, subject, lesson, question_count, len(existing_questions),
+            settings.GROQ_MODEL, subject, lesson or "<random per question>", question_count, len(existing_questions),
         )
 
         response = await _groq_client.chat.completions.create(
@@ -182,6 +232,10 @@ QUALITY RULES:
         options = q.get("options", [])
         correct = str(q.get("correct_answer", "")).strip()
         explanation = str(q.get("explanation", "")).strip()
+        # Fixed-lesson mode always uses the given lesson verbatim, regardless
+        # of what the model echoed back. Random mode uses the model's choice,
+        # falling back to the subject name if it returned something empty.
+        q_lesson = lesson if lesson else (str(q.get("lesson", "")).strip() or subject)
 
         # Skip malformed entries
         if not question_text or not isinstance(options, list) or len(options) < 2:
@@ -199,6 +253,7 @@ QUALITY RULES:
             "options": options,
             "correct_answer": correct,
             "explanation": explanation,
+            "lesson": q_lesson,
         })
 
     if not validated:
