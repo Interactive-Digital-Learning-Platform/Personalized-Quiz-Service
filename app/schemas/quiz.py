@@ -20,8 +20,24 @@ class GenerateQuizRequest(BaseModel):
     """Input payload for POST /quiz/generate"""
     grade: int = Field(10, ge=1, le=13, description="School grade level (1–13)")
     subject: str = Field(..., min_length=1, max_length=100)
-    lesson: str = Field(..., min_length=1, max_length=255)
-    difficulty: str = Field(..., description="easy | medium | hard")
+    lesson: str | None = Field(
+        default=None,
+        max_length=255,
+        description=(
+            "Optional. If omitted (the default), each question is independently "
+            "assigned a different, randomly varied lesson within the subject by "
+            "the AI — the quiz is NOT pinned to one topic. Set this to force "
+            "every question onto one specific lesson instead."
+        ),
+    )
+    difficulty: str | None = Field(
+        default=None,
+        description=(
+            "easy | medium | hard — optional. If omitted, the server picks the "
+            "difficulty automatically based on the user's accuracy history for "
+            "this subject/lesson (see difficulty_service.py)."
+        ),
+    )
     question_count: int = Field(..., ge=1, le=30, description="Number of questions to generate")
     excluded_question_ids: list[int] = Field(
         default_factory=list,
@@ -34,7 +50,9 @@ class GenerateQuizRequest(BaseModel):
 
     @field_validator("difficulty")
     @classmethod
-    def validate_difficulty(cls, v: str) -> str:
+    def validate_difficulty(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
         allowed = {"easy", "medium", "hard"}
         if v.lower() not in allowed:
             raise ValueError(f"difficulty must be one of {allowed}")
@@ -63,6 +81,15 @@ class GenerateQuizResponse(BaseModel):
     questions: list[QuestionOut]
     # Indicates whether these questions came from DB cache or fresh AI generation
     cache_hit: bool = False
+    # The difficulty actually used — chosen automatically from the user's
+    # accuracy history unless the caller explicitly overrode it.
+    difficulty: str
+    # Session-level lesson label. Normally "Mixed" — by default each question
+    # is independently assigned a different, random lesson within the subject
+    # (see each QuestionOut's own `lesson` for the per-question value). Only a
+    # single lesson name if the caller explicitly overrode it, or if every
+    # served question happened to land on the same lesson.
+    lesson: str
 
 
 class SavedQuizResponse(BaseModel):
@@ -88,6 +115,7 @@ class QuizSessionSummary(BaseModel):
     answered_count: int
     is_completed: bool
     accuracy: float | None = None
+    correct_count: int | None = None
     question_ids: list[int] = Field(
         default_factory=list,
         description="IDs of questions served in this session — used by the client to request fresh questions",

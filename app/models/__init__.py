@@ -12,6 +12,8 @@ from app.models.question import Question  # noqa: F401
 from app.models.quiz_session import QuizSession, QuestionAttempt  # noqa: F401
 from app.models.quiz_tracking import QuizCompletion, QuizProgressSnapshot  # noqa: F401
 from app.models.analytics import Analytics  # noqa: F401
+from app.models.lesson_mastery import LessonMastery  # noqa: F401
+from app.models.subject_mastery import SubjectMastery  # noqa: F401
 
 __all__ = [
 	"User",
@@ -21,4 +23,6 @@ __all__ = [
 	"QuizProgressSnapshot",
 	"QuizCompletion",
 	"Analytics",
+	"LessonMastery",
+	"SubjectMastery",
 ]

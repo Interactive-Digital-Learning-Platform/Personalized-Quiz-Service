@@ -79,11 +79,11 @@ async def generate_quiz_endpoint(
         )
 
     logger.info(
-        "Generate quiz request: clerk_id=%s, subject=%s, lesson=%s, difficulty=%s, count=%d",
+        "Generate quiz request: clerk_id=%s, subject=%s, lesson=%s (override), difficulty=%s (override), count=%d",
         clerk_id, payload.subject, payload.lesson, payload.difficulty, payload.question_count,
     )
 
-    session, questions, cache_hit = await generate_quiz(
+    session, questions, cache_hit, difficulty, lesson = await generate_quiz(
         db=db,
         clerk_id=clerk_id,
         payload=payload,
@@ -97,6 +97,8 @@ async def generate_quiz_endpoint(
         session_id=session.id,
         questions=question_out,
         cache_hit=cache_hit,
+        difficulty=difficulty,
+        lesson=lesson,
     )
 
 
@@ -156,6 +158,7 @@ async def list_quiz_sessions(
                 answered_count=latest.answered_count if latest else 0,
                 is_completed=session.completion is not None,
                 accuracy=session.completion.accuracy if session.completion else None,
+                correct_count=session.completion.correct_count if session.completion else None,
                 question_ids=question_ids,
             )
         )

@@ -44,3 +44,9 @@ class User(Base):
     analytics: Mapped[list["Analytics"]] = relationship(  # noqa: F821
         "Analytics", back_populates="user", cascade="all, delete-orphan"
     )
+    lesson_masteries: Mapped[list["LessonMastery"]] = relationship(  # noqa: F821
+        "LessonMastery", back_populates="user", cascade="all, delete-orphan"
+    )
+    subject_masteries: Mapped[list["SubjectMastery"]] = relationship(  # noqa: F821
+        "SubjectMastery", back_populates="user", cascade="all, delete-orphan"
+    )
