@@ -40,6 +40,12 @@ logger = logging.getLogger(__name__)
 DIFFICULTY_LEVELS = ["easy", "medium", "hard"]
 DEFAULT_DIFFICULTY = "easy"
 
+# Base 0-100 score per difficulty tier, used by mastery_service.py's
+# difficulty_score component. Kept here (not duplicated in mastery_service.py
+# or config) since it's fundamentally a difficulty-domain constant, same as
+# DIFFICULTY_LEVELS above.
+DIFFICULTY_BASE_SCORES = {"easy": 33.0, "medium": 66.0, "hard": 100.0}
+
 PROMOTE_ACCURACY_THRESHOLD = 80.0
 DEMOTE_ACCURACY_THRESHOLD = 40.0
 PROMOTE_STREAK_REQUIRED = 2
@@ -214,3 +220,71 @@ async def update_subject_mastery_after_submission(
     _apply_promote_demote(mastery, accuracy, log_label=f"user={user_id}, subject={subject}")
 
     await db.commit()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# READ-ONLY PROJECTION FOR ANALYTICS (GET /analytics/me)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def describe_subject_mastery(mastery: SubjectMastery | None) -> dict:
+    """
+    Read-only, pure projection of a SubjectMastery row (or safe defaults if
+    the subject has no mastery row yet) into the fields
+    GET /analytics/me exposes alongside subjects[].difficulty_performance.
+
+    This is the ONLY place that turns raw mastery state into a human-facing
+    description of "how close to promotion/demotion" a subject is — it reuses
+    the exact same constants and _step_difficulty() helper that
+    update_subject_mastery_after_submission() uses to actually move the
+    difficulty, so analytics can never drift from the real adaptive engine or
+    duplicate its thresholds. This function NEVER mutates `mastery` or
+    touches the DB — promotion/demotion only ever happens via
+    update_subject_mastery_after_submission(), called from quiz submission.
+
+    consecutive_strong/consecutive_weak are read as-is from the stored row:
+    by construction, a streak count reaching its required threshold triggers
+    a promotion/demotion AND a reset to 0 in the same update, so in practice
+    consecutive_strong is only ever observed as 0..(PROMOTE_STREAK_REQUIRED-1)
+    and consecutive_weak as 0..(DEMOTE_STREAK_REQUIRED-1) — this function
+    doesn't assume that, it just reads whatever is actually stored, so it
+    stays correct even if those thresholds are ever reconfigured.
+    """
+    current_difficulty = mastery.difficulty if mastery is not None else DEFAULT_DIFFICULTY
+    consecutive_strong = mastery.consecutive_strong if mastery is not None else 0
+    consecutive_weak = mastery.consecutive_weak if mastery is not None else 0
+
+    next_difficulty = _step_difficulty(current_difficulty, +1)
+    at_max_difficulty = next_difficulty == current_difficulty
+
+    promotion_progress_percentage = (
+        0.0 if at_max_difficulty
+        else round(min(consecutive_strong, PROMOTE_STREAK_REQUIRED) / PROMOTE_STREAK_REQUIRED * 100.0, 2)
+    )
+
+    if at_max_difficulty:
+        message = f"Already at the highest difficulty ({current_difficulty})."
+    elif consecutive_strong > 0:
+        remaining = max(PROMOTE_STREAK_REQUIRED - consecutive_strong, 0)
+        if remaining == 0:
+            message = f"Ready to advance to {next_difficulty} difficulty."
+        else:
+            quiz_word = "quiz" if remaining == 1 else "quizzes"
+            message = f"{remaining} more strong {quiz_word} needed to reach {next_difficulty} difficulty."
+    elif consecutive_weak > 0:
+        remaining = max(DEMOTE_STREAK_REQUIRED - consecutive_weak, 0)
+        quiz_word = "quiz" if remaining == 1 else "quizzes"
+        message = f"{remaining} more weak {quiz_word} until {current_difficulty} difficulty drops."
+    else:
+        message = f"At {current_difficulty} difficulty. Keep practicing to progress."
+
+    return {
+        "current_difficulty": current_difficulty,
+        "consecutive_strong_quizzes": consecutive_strong,
+        "consecutive_weak_quizzes": consecutive_weak,
+        "promotion_threshold": PROMOTE_ACCURACY_THRESHOLD,
+        "demotion_threshold": DEMOTE_ACCURACY_THRESHOLD,
+        "quizzes_required_for_promotion": PROMOTE_STREAK_REQUIRED,
+        "promotion_progress_percentage": promotion_progress_percentage,
+        "next_difficulty": next_difficulty,
+        "difficulty_status_message": message,
+    }

@@ -14,6 +14,7 @@ from app.models.quiz_tracking import QuizCompletion, QuizProgressSnapshot  # noq
 from app.models.analytics import Analytics  # noqa: F401
 from app.models.lesson_mastery import LessonMastery  # noqa: F401
 from app.models.subject_mastery import SubjectMastery  # noqa: F401
+from app.models.ai_generation_event import AIGenerationEvent  # noqa: F401
 
 __all__ = [
 	"User",
@@ -25,4 +26,5 @@ __all__ = [
 	"Analytics",
 	"LessonMastery",
 	"SubjectMastery",
+	"AIGenerationEvent",
 ]

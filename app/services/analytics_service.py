@@ -3,11 +3,19 @@ services/analytics_service.py
 ──────────────────────────────
 Business logic for computing and updating user analytics.
 
-Called after every quiz submission (`POST /quiz/submit`) to maintain the
-`analytics` table as an up-to-date aggregate of the user's performance.
+`update_analytics_after_submission()` is called after every quiz submission
+(`POST /quiz/submit`) to maintain the `analytics` table as an up-to-date
+aggregate of the user's performance.
 
-Also called by `GET /analytics/me` and `GET /analytics/feedback` to provide
-the user's learning profile.
+`get_user_analytics()` — called by `GET /analytics/me` and
+`GET /analytics/feedback` — is now a thin delegator to
+AnalyticsOrchestrationService (see app/services/analytics/orchestrator.py).
+The full ~1200-line implementation that used to live in this function was
+split into a dedicated `app/services/analytics/` package (typed query
+layer + 8 single-responsibility calculation services + one orchestrator)
+so this endpoint's logic stays maintainable as more analytics features are
+added — see that package's __init__.py for the full architecture and
+orchestrator.py for the exact query count.
 """
 import logging
 
@@ -17,7 +25,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.analytics import Analytics
 from app.models.quiz_session import QuizSession, QuestionAttempt
 from app.models.question import Question
-from app.models.user import User
+from app.services.analytics.orchestrator import get_user_analytics as _get_user_analytics
+from app.services.analytics.queries import valid_response_time_case
 from app.services.quiz_service import get_or_create_user
 from app.services.scoring_service import identify_weak_topic
 
@@ -64,7 +73,10 @@ async def update_analytics_after_submission(
             func.sum(
                 cast(QuestionAttempt.correct, Integer)
             ).label("correct_sum"),
-            func.avg(QuestionAttempt.response_time).label("avg_time"),
+            # CASE-wrapped so an invalid response time is excluded from this
+            # average without shrinking `total`/`correct_sum` above — those
+            # are accuracy counts and must stay response-time-agnostic.
+            func.avg(valid_response_time_case()).label("avg_time"),
         )
         .join(QuizSession, QuizSession.id == QuestionAttempt.session_id)
         .where(
@@ -143,61 +155,12 @@ async def get_user_analytics(db: AsyncSession, clerk_id: str) -> dict:
     """
     Build the full analytics profile for `GET /analytics/me`.
 
-    Returns:
-        {
-            overall_accuracy: float,
-            overall_avg_response_time: float,
-            total_sessions: int,
-            subjects: list[{subject, accuracy, avg_response_time, weak_topic}],
-            strong_subjects: list[str],
-            weak_subjects: list[str],
-        }
+    Delegates entirely to AnalyticsOrchestrationService — see
+    app/services/analytics/orchestrator.py for the query plan and
+    app/services/analytics/__init__.py for the full architecture. Kept as a
+    module-level function here (rather than requiring every caller to
+    import the orchestrator directly) so existing callers — the
+    GET /analytics/me and GET /analytics/feedback routes — don't need to
+    change.
     """
-    user = await get_or_create_user(db, clerk_id)
-
-    # ── Fetch per-subject analytics rows ──────────────────────────────────────
-    analytics_stmt = select(Analytics).where(Analytics.user_id == user.id)
-    analytics_result = await db.execute(analytics_stmt)
-    rows: list[Analytics] = list(analytics_result.scalars().all())
-
-    # ── Count total quiz sessions ──────────────────────────────────────────────
-    session_count_stmt = select(func.count(QuizSession.id)).where(
-        QuizSession.user_id == user.id
-    )
-    total_sessions: int = (await db.execute(session_count_stmt)).scalar_one()
-
-    # ── Compute overall averages ───────────────────────────────────────────────
-    if rows:
-        overall_accuracy = round(sum(r.accuracy for r in rows) / len(rows), 2)
-        overall_avg_response_time = round(
-            sum(r.avg_response_time for r in rows) / len(rows), 3
-        )
-    else:
-        overall_accuracy = 0.0
-        overall_avg_response_time = 0.0
-
-    # ── Sort subjects by accuracy ──────────────────────────────────────────────
-    sorted_subjects = sorted(rows, key=lambda r: r.accuracy, reverse=True)
-    midpoint = len(sorted_subjects) // 2
-
-    strong_subjects = [r.subject for r in sorted_subjects[:midpoint]] if sorted_subjects else []
-    weak_subjects = [r.subject for r in sorted_subjects[midpoint:]] if sorted_subjects else []
-
-    subjects_data = [
-        {
-            "subject": r.subject,
-            "accuracy": r.accuracy,
-            "avg_response_time": r.avg_response_time,
-            "weak_topic": r.weak_topic,
-        }
-        for r in rows
-    ]
-
-    return {
-        "overall_accuracy": overall_accuracy,
-        "overall_avg_response_time": overall_avg_response_time,
-        "total_sessions": total_sessions,
-        "subjects": subjects_data,
-        "strong_subjects": strong_subjects,
-        "weak_subjects": weak_subjects,
-    }
+    return await _get_user_analytics(db, clerk_id)
