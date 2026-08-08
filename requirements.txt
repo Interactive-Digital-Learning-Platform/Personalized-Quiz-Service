@@ -7,6 +7,7 @@ sqlalchemy>=2.0.0                # Async ORM (2.x API)
 asyncpg>=0.29.0                  # Async PostgreSQL driver (used by SQLAlchemy)
 aiosqlite>=0.20.0                # Async SQLite driver for local development fallback
 greenlet>=3.0.0                  # Required by SQLAlchemy's async engine bridge
+alembic>=1.13.0                  # Schema migrations (see alembic/versions/)
 
 # ── Configuration & Validation ────────────────────────────────────────────────
 pydantic>=2.7.0                  # Data validation (v2)
@@ -23,3 +24,7 @@ groq>=0.9.0                      # Official Groq Python SDK
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 python-multipart>=0.0.9          # Required for FastAPI form data
+
+# ── Testing ───────────────────────────────────────────────────────────────────
+pytest>=8.0.0                    # Test runner
+pytest-asyncio>=0.23.0           # Async test support (async def test_* functions)

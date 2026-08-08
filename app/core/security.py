@@ -107,3 +107,31 @@ async def get_current_user(
         )
 
     return payload
+
+
+async def require_admin_or_dev(current_user: dict = Depends(get_current_user)) -> dict:
+    """
+    FastAPI dependency for internal/admin-only endpoints (e.g.
+    GET /analytics/system/ai-generation) — this project has no formal
+    role/permission system, so access is granted when EITHER:
+    - the app is running in development (ENVIRONMENT == "development"), or
+    - the authenticated user's Clerk ID (the JWT "sub" claim) is listed in
+      ADMIN_CLERK_IDS.
+
+    Still requires a valid authenticated user first (via get_current_user) —
+    this only adds an ADDITIONAL restriction on top, it never loosens
+    authentication itself.
+
+    Raises HTTP 403 if neither condition is met.
+    """
+    if settings.ENVIRONMENT == "development":
+        return current_user
+
+    admin_ids = {cid.strip() for cid in settings.ADMIN_CLERK_IDS.split(",") if cid.strip()}
+    if current_user.get("sub") in admin_ids:
+        return current_user
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="This endpoint is restricted to administrators.",
+    )

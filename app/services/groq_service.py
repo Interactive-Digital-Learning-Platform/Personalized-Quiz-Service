@@ -20,12 +20,21 @@ Design principles:
 - Raise `HTTPException` with a clear 502 status on Groq failures so the caller
   can surface a meaningful error to the frontend.
 """
+import asyncio
 import json
 import logging
+import random
 from datetime import datetime, timezone
 
 from fastapi import HTTPException, status
-from groq import AsyncGroq, GroqError
+from groq import (
+    APIConnectionError,
+    APITimeoutError,
+    AsyncGroq,
+    GroqError,
+    InternalServerError,
+    RateLimitError,
+)
 
 from app.core.config import settings
 
@@ -34,6 +43,44 @@ logger = logging.getLogger(__name__)
 # ── Groq client (module-level singleton) ──────────────────────────────────────
 # AsyncGroq is the async version of the Groq client — works natively in FastAPI.
 _groq_client = AsyncGroq(api_key=settings.GROQ_API_KEY)
+
+# Only these are worth retrying — rate limit, timeout, dropped connection, and
+# Groq-side 5xx are all transient. AuthenticationError/BadRequestError/etc.
+# (the rest of GroqError) would just fail the same way every time, so they're
+# left to raise immediately via the plain `except GroqError` below.
+_TRANSIENT_GROQ_ERRORS = (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError)
+
+
+async def _create_chat_completion_with_retry(*, messages: list[dict]):
+    """
+    Calls Groq's chat-completions endpoint, retrying only transient errors
+    with exponential backoff + jitter (GROQ_MAX_RETRIES attempts beyond the
+    first, base delay GROQ_RETRY_BASE_DELAY_SECONDS). Without this, a single
+    rate-limit blip turned an otherwise-successful quiz generation into an
+    immediate failure — see quiz_service.generate_quiz()'s cache-fallback
+    path, which used to be reached far more often than it should have been.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(settings.GROQ_MAX_RETRIES + 1):
+        try:
+            return await _groq_client.chat.completions.create(
+                model=settings.GROQ_MODEL,
+                messages=messages,
+                temperature=0.95,
+                max_tokens=4096,
+                response_format={"type": "json_object"},
+            )
+        except _TRANSIENT_GROQ_ERRORS as exc:
+            last_exc = exc
+            if attempt == settings.GROQ_MAX_RETRIES:
+                break
+            delay = settings.GROQ_RETRY_BASE_DELAY_SECONDS * (2 ** attempt) + random.uniform(0, 0.5)
+            logger.warning(
+                "Transient Groq error (%s) on attempt %d/%d, retrying in %.1fs: %s",
+                type(exc).__name__, attempt + 1, settings.GROQ_MAX_RETRIES + 1, delay, exc,
+            )
+            await asyncio.sleep(delay)
+    raise last_exc
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -48,6 +95,7 @@ async def generate_questions(
     lesson: str | None = None,
     existing_questions: list[str] | None = None,
     avoid_lessons: list[str] | None = None,
+    telemetry: dict | None = None,
 ) -> list[dict]:
     """
     Call Groq to generate `question_count` multiple-choice questions.
@@ -65,6 +113,13 @@ async def generate_questions(
     `avoid_lessons` — only used when `lesson` is None. Lessons this user was
     recently quizzed on for this subject, so repeated generations get lesson
     variety across sessions too, not just within one quiz.
+
+    `telemetry` — optional mutable dict; if given, this call ADDS its own
+    invalid-question count onto `telemetry["invalid_question_count"]` (raw
+    questions Groq returned that failed validation — see quiz_service.
+    generate_quiz(), which is the only caller that passes this, purely for
+    internal AI-generation telemetry). Never required, never changes this
+    function's return value or behavior otherwise.
 
     Returns a list of dicts, each with:
         - question (str)
@@ -185,15 +240,11 @@ QUALITY RULES:
             settings.GROQ_MODEL, subject, lesson or "<random per question>", question_count, len(existing_questions),
         )
 
-        response = await _groq_client.chat.completions.create(
-            model=settings.GROQ_MODEL,
+        response = await _create_chat_completion_with_retry(
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=0.95,             # High creativity for maximum question variety
-            max_tokens=4096,              # Generous limit for many questions
-            response_format={"type": "json_object"},  # Forces valid JSON output
         )
 
     except GroqError as exc:
@@ -256,6 +307,10 @@ QUALITY RULES:
             "lesson": q_lesson,
         })
 
+    if telemetry is not None:
+        invalid_count = len(raw_questions[:question_count]) - len(validated)
+        telemetry["invalid_question_count"] = telemetry.get("invalid_question_count", 0) + invalid_count
+
     if not validated:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -282,8 +337,26 @@ async def generate_feedback(analytics_summary: dict) -> dict:
             "subjects": [
                 {"subject": "Maths", "accuracy": 45.0, "weak_topic": "Algebra"},
                 {"subject": "Science", "accuracy": 85.0, "weak_topic": None},
-            ]
+            ],
+            "recommendations": [
+                {
+                    "priority": 1, "type": "weak_topic", "subject": "Maths",
+                    "topic": "Algebra", "reason": "Accuracy is 30% across 10 attempts",
+                    "recommended_action": "Complete an easy practice quiz on Algebra",
+                    "recommended_difficulty": "easy",
+                    "supporting_metrics": {"accuracy": 30.0, "attempts": 10, ...},
+                },
+                ...
+            ],
         }
+
+    `recommendations` (see app/services/recommendation_service.py) is
+    deterministic and database-driven — computed with NO AI involvement.
+    When present, the prompt below explicitly tells Groq to treat it as
+    ground truth and build suggestions FROM it rather than inventing its own
+    analysis, so the AI-written suggestions stay consistent with the numbers
+    already shown elsewhere in the app; when it's empty (insufficient data),
+    Groq falls back to general, non-numeric encouragement instead.
 
     Returns a dict with keys:
         weak_areas, strong_areas, suggestions, motivational_note
@@ -303,13 +376,31 @@ CRITICAL: Respond ONLY with a valid JSON object in this exact structure:
   "motivational_note": "A short, encouraging 1-2 sentence message."
 }
 
+The input includes a "recommendations" array — a deterministic, already-computed
+list of what to focus on next, ranked by priority, each with a "reason" and a
+"recommended_action" grounded in real numbers from the database.
+- If "recommendations" is non-empty: base "weak_areas" and "suggestions" on
+  those entries (their subject/topic/reason/recommended_action), in priority
+  order. You may rephrase them in a warmer, more encouraging tone, but do not
+  contradict them or change which subjects/topics they point to.
+- If "recommendations" is empty: there isn't enough data yet — give general,
+  encouraging, non-numeric guidance instead (e.g. "keep practising regularly").
+
+CRITICAL — do not invent numbers: every accuracy percentage, attempt count, or
+other statistic you mention MUST come directly from the provided data. Never
+fabricate or estimate a number that isn't present in the input. If you don't
+have a specific figure for something, describe it qualitatively instead
+(e.g. "you've been slipping in Algebra" rather than guessing a percentage).
+
 Be specific and reference the actual subjects/topics from the data.
 Keep suggestions practical and achievable for a school student.
 """
 
     user_prompt = (
-        "Here is the student's performance summary:\n"
-        f"{json.dumps(analytics_summary, indent=2)}\n\n"
+        "Here is the student's performance summary, including a "
+        "pre-computed, database-driven `recommendations` list ranked by "
+        "priority (use it as ground truth — see the system instructions):\n"
+        f"{json.dumps(analytics_summary, indent=2, default=str)}\n\n"
         "Please provide personalised feedback and study suggestions."
     )
 
