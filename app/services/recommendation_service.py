@@ -1,46 +1,8 @@
-"""
-services/recommendation_service.py
-─────────────────────────────────────
-Deterministic, database-driven recommendation engine for GET /analytics/me.
-
-This module NEVER calls Groq or any AI service, and makes no DB calls of its
-own — generate_recommendations() takes the analytics dict that
-analytics_service.get_user_analytics() has already fully assembled (accuracy,
-performance_trend, repeated_question_analytics, mastery_score,
-answering_behavior, difficulty/mastery state, session-completion figures —
-all computed elsewhere) and derives a prioritized recommendation list purely
-from that data. Because it only depends on the SHAPE of that dict, it can be
-unit-tested with plain Python dicts, with no database at all (see
-tests/test_recommendation_service.py).
-
-The separate, AI-powered GET /analytics/feedback endpoint (groq_service.
-generate_feedback()) may use this module's output as grounded source
-material for its prompt — see that function's docstring — but this module
-itself has no knowledge of Groq and produces the same output for the same
-input every time.
-
-── Priority model ─────────────────────────────────────────────────────────
-Two layers, both deterministic:
-
-1. TYPE_BASE_PRIORITY — a fixed ordering of the 8 recommendation types from
-   most to least urgent. This is what guarantees weak/declining topics
-   normally outrank "maintain strong subject" recommendations: it's an
-   ordering rule, not a coincidence of scoring.
-2. Within the same type, a `_severity_score()` tie-breaker folds in every
-   factor the spec asked for (low accuracy, attempt volume, declining trend,
-   repeated mistakes, mastery score, recency) into one number — higher
-   means more urgent among peers of the same type.
-
-Recommendations are deduplicated by (subject, topic) — if a topic already
-produced a recommendation, no second, lower-priority recommendation is
-generated for that same (subject, topic) pair — then capped at
-ANALYTICS_RECOMMENDATION_MAX_COUNT (default 5).
-"""
 from datetime import datetime, timezone
 
-# Lower = more urgent. This ordering is the primary sort key — severity only
-# breaks ties WITHIN a type, so a "weak_topic" candidate always outranks a
-# "maintain_strong_subject" one regardless of either one's severity score.
+# Lower = more urgent, and this is the PRIMARY sort key — severity (below)
+# only breaks ties within the same type, so a "weak_topic" always outranks a
+# "maintain_strong_subject" regardless of either one's severity score.
 TYPE_BASE_PRIORITY = {
     "weak_topic": 1,
     "declining_subject": 2,
@@ -72,11 +34,8 @@ def _severity_score(
     recency_weight: float,
     recency_half_life_days: float,
 ) -> float:
-    """
-    Higher = more urgent. Used only to order candidates that share the same
-    recommendation type — see TYPE_BASE_PRIORITY for the coarser ordering
-    that actually decides which types outrank which.
-    """
+    # Higher = more urgent — only used to order candidates that already
+    # share the same type (TYPE_BASE_PRIORITY decides which types win).
     score = 0.0
     if accuracy is not None:
         score += (100.0 - accuracy) * accuracy_weight
@@ -86,26 +45,18 @@ def _severity_score(
         score += (100.0 - mastery_score) * mastery_weight
     if last_attempted_at is not None:
         days_ago = max((now - last_attempted_at).total_seconds() / 86400.0, 0.0)
-        # Exponential decay: activity from one half-life ago counts half as
-        # much toward urgency as activity from right now — a topic the
-        # student struggled with yesterday is more actionable today than one
-        # they struggled with two months ago.
+        # Exponential decay — something struggled with yesterday is more
+        # actionable today than something struggled with two months ago.
         recency_factor = 0.5 ** (days_ago / recency_half_life_days)
         score += recency_factor * 100.0 * recency_weight
     return score
 
 
 def _subject_topic_totals(subject_data: dict) -> tuple[int, datetime | None]:
-    """
-    Sum of total_attempted and the latest last_attempted_at across a
-    subject's shown topics — used only as severity-tiebreaker inputs for
-    subject-level candidates (declining_subject, difficulty_ready_for_
-    promotion, maintain_strong_subject). NOTE: subjects[].topics is capped at
-    ANALYTICS_MAX_TOPICS_PER_SUBJECT for display, so for a subject with more
-    topics than that cap, this slightly undercounts — acceptable here since
-    it only affects tie-breaking order among same-type candidates, never
-    whether a recommendation triggers at all.
-    """
+    # Only used as tie-breaker inputs for subject-level candidates. Since
+    # subjects[].topics is capped for display, a subject with more topics
+    # than that cap gets slightly undercounted here — fine, since this only
+    # affects ordering among same-type candidates, never whether one triggers.
     topics = subject_data["topics"]
     if not topics:
         return 0, None
@@ -193,7 +144,6 @@ def _build_candidates(analytics: dict, *, settings_obj) -> list[dict]:
                     },
                 })
 
-        # ── Subject-level candidates ─────────────────────────────────────────
         subject_trend = subject_data["performance_trend"]
         subject_repeated = subject_data["repeated_question_analytics"]
         subject_attempts, subject_last_attempted_at = _subject_topic_totals(subject_data)
@@ -221,9 +171,9 @@ def _build_candidates(analytics: dict, *, settings_obj) -> list[dict]:
                 },
             })
 
-        # "Ready for promotion" per requirement: ONLY when the existing
-        # SubjectMastery streak rules already indicate the student is one
-        # strong quiz away — never invents its own readiness criteria.
+        # Only fires when the existing SubjectMastery streak already says
+        # the student is one strong quiz from promotion — never invents its
+        # own readiness criteria separate from the real adaptive-difficulty engine.
         if (
             subject_data["consecutive_strong_quizzes"] >= 1
             and subject_data["consecutive_strong_quizzes"] == subject_data["quizzes_required_for_promotion"] - 1
@@ -263,7 +213,6 @@ def _build_candidates(analytics: dict, *, settings_obj) -> list[dict]:
                 },
             })
 
-    # ── Overall-scope candidate: incomplete_quiz ────────────────────────────
     total_sessions = analytics["total_sessions"]
     abandoned_sessions = analytics["abandoned_sessions"]
     if total_sessions > 0:
@@ -292,15 +241,11 @@ def generate_recommendations(
     settings_obj=None,
     now: datetime | None = None,
 ) -> list[dict]:
-    """
-    Builds the final, capped, deduplicated, priority-ordered recommendation
-    list from an already-assembled analytics dict (the same shape returned
-    by analytics_service.get_user_analytics()). Returns [] when no
-    recommendation trigger condition is met anywhere (which is exactly what
-    happens when there's insufficient data — every trigger already requires
-    its own minimum data, e.g. "weak" topic status already requires
-    ANALYTICS_TOPIC_MIN_ATTEMPTS attempts).
-    """
+    # Builds the final, capped, deduplicated, priority-ordered list from an
+    # already-assembled analytics dict — no DB access, no Groq, fully
+    # deterministic. Returns [] when nothing triggers, which naturally
+    # happens whenever there's too little data (every trigger already
+    # requires its own minimum, e.g. "weak" status needs enough attempts).
     if settings_obj is None:
         from app.core.config import settings as settings_obj
     if now is None:
@@ -326,13 +271,10 @@ def generate_recommendations(
             recency_weight=settings_obj.ANALYTICS_RECOMMENDATION_RECENCY_WEIGHT,
             recency_half_life_days=settings_obj.ANALYTICS_RECOMMENDATION_RECENCY_HALF_LIFE_DAYS,
         )
-        # Sorted ascending: lower type-priority number first, then higher
-        # severity first (negated) within the same type.
         candidate["_sort_key"] = (TYPE_BASE_PRIORITY[candidate["type"]], -severity)
 
-    # Deduplicate: keep only the single best (lowest sort_key) candidate per
-    # (subject, topic) pair — requirement: avoid duplicate recommendations
-    # for the same subject/topic.
+    # Keep only the single best candidate per (subject, topic) — no
+    # duplicate recommendations for the same subject/topic pair.
     best_by_key: dict[tuple[str | None, str | None], dict] = {}
     for candidate in candidates:
         key = (candidate["subject"], candidate["topic"])

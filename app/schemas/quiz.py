@@ -1,23 +1,9 @@
-"""
-schemas/quiz.py
-───────────────
-Pydantic v2 schemas for quiz generation and submission endpoints.
-
-Schema design decisions:
-- `GenerateQuizRequest` uses literal types for difficulty to enforce valid values.
-- `QuestionOut` uses `model_config from_attributes` so it can be built from ORM objects.
-- `SubmitQuizRequest` contains a nested list of per-question answers + timings.
-- `SubmitQuizResponse` is returned immediately after submission with computed metrics.
-"""
 from typing import Any, Literal
 from datetime import datetime
 from pydantic import BaseModel, Field, field_validator
 
 
-# ── Quiz Generation ────────────────────────────────────────────────────────────
-
 class GenerateQuizRequest(BaseModel):
-    """Input payload for POST /quiz/generate"""
     grade: int = Field(10, ge=1, le=13, description="School grade level (1–13)")
     subject: str = Field(..., min_length=1, max_length=100)
     lesson: str | None = Field(
@@ -60,13 +46,9 @@ class GenerateQuizRequest(BaseModel):
 
 
 class QuestionOut(BaseModel):
-    """
-    A single question returned to the frontend.
-    `correct_answer` is included so the frontend can compare submitted answers.
-    """
     id: int
     question: str
-    options: list[Any] | None = None   # List of answer choices
+    options: list[Any] | None = None
     subject: str
     lesson: str
     difficulty: str
@@ -76,24 +58,14 @@ class QuestionOut(BaseModel):
 
 
 class GenerateQuizResponse(BaseModel):
-    """Response payload for POST /quiz/generate"""
     session_id: int
     questions: list[QuestionOut]
-    # Indicates whether these questions came from DB cache or fresh AI generation
     cache_hit: bool = False
-    # The difficulty actually used — chosen automatically from the user's
-    # accuracy history unless the caller explicitly overrode it.
     difficulty: str
-    # Session-level lesson label. Normally "Mixed" — by default each question
-    # is independently assigned a different, random lesson within the subject
-    # (see each QuestionOut's own `lesson` for the per-question value). Only a
-    # single lesson name if the caller explicitly overrode it, or if every
-    # served question happened to land on the same lesson.
     lesson: str
 
 
 class SavedQuizResponse(BaseModel):
-    """Response payload for retrieving a previously generated quiz session."""
     session_id: int
     subject: str
     lesson: str
@@ -106,7 +78,6 @@ class SavedQuizResponse(BaseModel):
 
 
 class QuizSessionSummary(BaseModel):
-    """Lightweight session summary for the practice list."""
     session_id: int
     subject: str
     difficulty: str
@@ -122,13 +93,9 @@ class QuizSessionSummary(BaseModel):
     )
 
 
-# ── Quiz Submission ────────────────────────────────────────────────────────────
-
 class AnswerItem(BaseModel):
-    """One answer entry — one per question in the quiz."""
     question_id: int
     selected_answer: str
-    # Time spent on this question in seconds (measured by the frontend)
     response_time: float = Field(..., ge=0.0)
     is_repeated: bool = False
 
@@ -140,8 +107,6 @@ class ProgressAnswerDraft(BaseModel):
 
 
 class SaveProgressRequest(BaseModel):
-    """Input payload for POST /quiz/progress/save"""
-
     session_id: int
     remaining_time: float | None = Field(default=None, ge=0.0)
     answered_count: int = Field(default=0, ge=0)
@@ -160,7 +125,6 @@ class SaveProgressResponse(BaseModel):
 
 
 class SubmitQuizRequest(BaseModel):
-    """Input payload for POST /quiz/submit"""
     session_id: int
     answers: list[AnswerItem] = Field(..., min_length=1)
     ended_by: Literal["submitted", "timeout"] = "submitted"
@@ -169,11 +133,10 @@ class SubmitQuizRequest(BaseModel):
 
 
 class SubmitQuizResponse(BaseModel):
-    """Computed results returned immediately after submission."""
     session_id: int
-    score: float           # Number of correct answers
-    accuracy: float        # Percentage correct (0.0 – 100.0)
-    total_time: float      # Sum of all response_times in seconds
+    score: float
+    accuracy: float
+    total_time: float
     avg_response_time: float
     correct_count: int
     total_questions: int

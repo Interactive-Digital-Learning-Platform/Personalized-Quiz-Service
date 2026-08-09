@@ -1,40 +1,3 @@
-"""
-services/analytics/orchestrator.py
-────────────────────────────────────────
-AnalyticsOrchestrationService — the single entry point behind
-GET /analytics/me: runs every query exactly once, then runs the 8 named
-services in dependency order, assembling the same response dict shape the
-endpoint returned before this refactor (see app/services/analytics_service.
-py's get_user_analytics(), which now just delegates here).
-
-── Query count ─────────────────────────────────────────────────────────────
-Exactly 18 SQL statements run per request, ALL of them bounded, aggregate
-queries scoped to `user_id` — never a query inside a per-subject or
-per-topic loop, so this count is FIXED regardless of how many subjects,
-topics, or sessions the user has:
-
- 1. fetch_analytics_rows                    9. fetch_response_time_rows
- 2. fetch_subject_mastery_by_subject        10. fetch_session_completed_at
- 3-6. fetch_session_completion_stats        11. fetch_trend_attempt_rows
-      (4 queries: total sessions,           12. fetch_repeated_attempt_rows
-       completion aggregate, avg            13. fetch_difficulty_attempt_rows
-       questions/session, incomplete-       14. fetch_difficulty_session_rows
-       session activity)                    15. fetch_topic_difficulty_rows
- 7-8. fetch_graded_totals                   16-17. fetch_growth_session_rows,
-      (2 queries: graded totals,                  fetch_growth_attempt_rows
-       unanswered questions)
- 9. fetch_topic_rows
-
-(get_or_create_user() adds one more SELECT — and, only for a brand new
-user's very first request ever, one INSERT — but that's shared with every
-other endpoint in this app, not specific to analytics.)
-
-Everything past that point — grouping by subject/topic, computing accuracy/
-trend/mastery/growth/recommendations for however many subjects and topics
-exist — happens in Python over data already sitting in memory. Adding a
-10th subject or a 50th topic changes how much Python work happens, but adds
-ZERO new queries.
-"""
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -66,7 +29,12 @@ def _group_response_time_rows(
 
 
 class AnalyticsOrchestrationService:
-    """Builds the full GET /analytics/me response dict for one user."""
+    # Builds the full GET /analytics/me response for one user: runs every
+    # query in queries.py exactly once (18 bounded, user-scoped SQL
+    # statements total — fixed no matter how many subjects/topics/sessions
+    # the user has, since nothing here loops a query per subject or topic),
+    # then runs the analytics services in dependency order over that data,
+    # entirely in Python from here on.
 
     def __init__(self, db: AsyncSession, clerk_id: str):
         self._db = db
@@ -169,5 +137,4 @@ class AnalyticsOrchestrationService:
 
 
 async def get_user_analytics(db: AsyncSession, clerk_id: str) -> dict:
-    """Module-level convenience wrapper — see AnalyticsOrchestrationService."""
     return await AnalyticsOrchestrationService(db, clerk_id).build()

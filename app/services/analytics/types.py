@@ -1,22 +1,3 @@
-"""
-services/analytics/types.py
-──────────────────────────────
-Typed internal data structures for the GET /analytics/me pipeline.
-
-Two categories:
-1. "Row" dataclasses — one per DB query in queries.py, shaping raw
-   SQLAlchemy Result rows into plain, typed, IDE-friendly objects instead of
-   passing Row/RowMapping objects (or ad-hoc dicts) between layers.
-2. Aggregate dataclasses — typed containers for values computed directly by
-   a single SQL aggregate query (no further per-row grouping needed), and
-   the RawAnalyticsData bundle that carries everything queries.py fetched
-   into the orchestration layer in one pass.
-
-None of these are Pydantic models — they never cross the API boundary
-directly (the route only ever returns UserAnalyticsResponse, built from a
-plain dict at the very end) — plain dataclasses are enough here and keep
-this internal layer decoupled from the API schema layer.
-"""
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -24,13 +5,8 @@ from app.models.analytics import Analytics
 from app.models.subject_mastery import SubjectMastery
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Per-query row shapes
-# ─────────────────────────────────────────────────────────────────────────────
-
 @dataclass(frozen=True, slots=True)
 class TopicRow:
-    """One row of the per-(subject, topic) graded-attempt aggregate."""
     subject: str
     topic: str
     total_attempted: int
@@ -40,8 +16,6 @@ class TopicRow:
 
 @dataclass(frozen=True, slots=True)
 class ResponseTimeRow:
-    """One VALID (already filtered) response time, with enough context to
-    be grouped by overall/subject/topic scope."""
     subject: str
     topic: str
     correct: bool
@@ -50,8 +24,6 @@ class ResponseTimeRow:
 
 @dataclass(frozen=True, slots=True)
 class TrendAttemptRow:
-    """One graded attempt belonging to a COMPLETED session, for performance-
-    trend session-bucketing."""
     session_id: int
     subject: str
     topic: str
@@ -60,8 +32,6 @@ class TrendAttemptRow:
 
 @dataclass(frozen=True, slots=True)
 class RepeatedAttemptRow:
-    """One graded attempt, chronologically ordered, for repeated-question/
-    repeated-mistake grouping by Question.question_fingerprint."""
     attempt_id: int
     correct: bool
     fingerprint: str
@@ -72,7 +42,6 @@ class RepeatedAttemptRow:
 
 @dataclass(frozen=True, slots=True)
 class DifficultyAttemptRow:
-    """One row of the per-(subject, difficulty) graded-attempt aggregate."""
     subject: str
     difficulty: str
     total_attempted: int
@@ -82,7 +51,6 @@ class DifficultyAttemptRow:
 
 @dataclass(frozen=True, slots=True)
 class DifficultySessionRow:
-    """One row of the per-(subject, difficulty) distinct-completed-session count."""
     subject: str
     difficulty: str
     completed_sessions: int
@@ -90,8 +58,6 @@ class DifficultySessionRow:
 
 @dataclass(frozen=True, slots=True)
 class TopicDifficultyRow:
-    """One row of the per-(subject, topic, difficulty) graded-attempt
-    aggregate — used only to feed topic-level mastery's difficulty_score."""
     subject: str
     topic: str
     difficulty: str
@@ -101,8 +67,6 @@ class TopicDifficultyRow:
 
 @dataclass(frozen=True, slots=True)
 class GrowthSessionRow:
-    """One session started within the growth rolling window, with its
-    completion/abandonment-relevant fields."""
     session_id: int
     created_at: datetime
     completion_id: int | None
@@ -111,7 +75,6 @@ class GrowthSessionRow:
 
 @dataclass(frozen=True, slots=True)
 class GrowthAttemptRow:
-    """One graded attempt within the growth rolling window."""
     session_id: int
     correct: bool
     subject: str
@@ -119,14 +82,8 @@ class GrowthAttemptRow:
     session_created_at: datetime
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Aggregate containers (already fully computed by a single SQL query)
-# ─────────────────────────────────────────────────────────────────────────────
-
 @dataclass(slots=True)
 class SessionCompletionStats:
-    """Session-completion figures — see AnalyticsSummaryService for the
-    classification rules (completed/incomplete/timed_out/abandoned)."""
     total_sessions: int
     completed_sessions: int
     timed_out_sessions: int
@@ -140,8 +97,6 @@ class SessionCompletionStats:
 
 @dataclass(slots=True)
 class GradedTotals:
-    """Weighted, attempt-level correct/incorrect/unanswered totals — the
-    source of truth for overall_accuracy (see AnalyticsSummaryService)."""
     total_correct_answers: int
     total_incorrect_answers: int
     total_unanswered_questions: int
@@ -149,20 +104,12 @@ class GradedTotals:
     overall_accuracy: float
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# The full raw-data bundle handed to the orchestration layer
-# ─────────────────────────────────────────────────────────────────────────────
-
 @dataclass(slots=True)
 class RawAnalyticsData:
-    """
-    Everything queries.py fetches for one user, in ONE pass — see
-    orchestrator.py. Every one of the 8 orchestration services reads from
-    this same bundle rather than issuing its own queries, which is what
-    keeps the total query count fixed regardless of how many subjects/
-    topics/sessions the user has (see queries.py's module docstring for the
-    full list and orchestrator.py for the final count).
-    """
+    # Everything queries.py fetches for one user, in one pass — every
+    # orchestration service reads from this same bundle instead of issuing
+    # its own queries, which is what keeps the total query count fixed no
+    # matter how many subjects/topics/sessions the user has.
     analytics_rows: list[Analytics]
     mastery_by_subject: dict[str, SubjectMastery]
     session_stats: SessionCompletionStats

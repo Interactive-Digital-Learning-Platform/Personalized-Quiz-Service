@@ -1,32 +1,3 @@
-"""
-services/mastery_service.py
-─────────────────────────────
-A dedicated, self-contained home for the mastery-score formula used by
-GET /analytics/me's subjects[] and subjects[].topics[] entries.
-
-Every function here is a PURE function — no DB access, no async, no
-dependency on any other service — so the formula itself can be unit-tested
-completely independently of the database (see tests/test_mastery_service.py).
-analytics_service.get_user_analytics() is responsible for gathering the raw
-inputs (accuracy, recent-period accuracy, difficulty state, repeated-question
-counts, per-session accuracies) and handing them to build_mastery_analytics()
-here; this module never queries anything itself and never writes to
-SubjectMastery or any other table — mastery_score is purely descriptive.
-
-Formula (each component clamped to 0-100 before weighting, and the final
-score clamped again after):
-
-    mastery_score =
-        accuracy_score            * ANALYTICS_MASTERY_ACCURACY_WEIGHT +
-        recent_performance_score  * ANALYTICS_MASTERY_RECENT_PERFORMANCE_WEIGHT +
-        difficulty_score          * ANALYTICS_MASTERY_DIFFICULTY_WEIGHT +
-        retention_score           * ANALYTICS_MASTERY_RETENTION_WEIGHT +
-        consistency_score         * ANALYTICS_MASTERY_CONSISTENCY_WEIGHT
-
-All weights and thresholds are read from app.core.config.settings by the
-caller and passed in explicitly — nothing in this module hardcodes them,
-so they stay configurable in exactly one place.
-"""
 import statistics
 
 
@@ -47,12 +18,9 @@ def compute_mastery_score(
     retention_weight: float,
     consistency_weight: float,
 ) -> float:
-    """
-    The weighted formula itself. Every input is clamped to 0-100
-    independently before weighting (a caller passing an out-of-range value
-    can't skew the result beyond what a single component honestly allows),
-    and the weighted sum is clamped again at the end as a final safety net.
-    """
+    # Weighted sum of the 5 components below, each clamped to 0-100 first so
+    # one out-of-range input can't skew the result beyond what it honestly
+    # should — then clamped again at the end as a final safety net.
     weighted_total = (
         _clamp(accuracy_score) * accuracy_weight
         + _clamp(recent_performance_score) * recent_performance_weight
@@ -70,13 +38,6 @@ def classify_mastery_level(
     proficient_threshold: float,
     advanced_threshold: float,
 ) -> str:
-    """
-    "beginner" | "developing" | "proficient" | "advanced" — half-open
-    intervals: [0, developing_threshold) -> beginner,
-    [developing_threshold, proficient_threshold) -> developing,
-    [proficient_threshold, advanced_threshold) -> proficient,
-    [advanced_threshold, 100] -> advanced.
-    """
     if score < developing_threshold:
         return "beginner"
     if score < proficient_threshold:
@@ -93,18 +54,10 @@ def compute_difficulty_score(
     base_scores: dict[str, float],
     neutral_score: float,
 ) -> float:
-    """
-    Base score for the difficulty tier itself (see
-    difficulty_service.DIFFICULTY_BASE_SCORES), adjusted by how well the
-    student is actually performing at that tier — a simple average of the
-    two, so a student parked at "hard" but scoring poorly there doesn't get
-    full marks just for being on the hardest tier, and a student doing very
-    well at "easy" isn't scored as low as the tier alone would suggest.
-
-    `accuracy_at_current_difficulty` is None when the scope has no graded
-    attempts at its own current difficulty yet (e.g. just promoted/demoted) —
-    `neutral_score` stands in for that missing half of the average.
-    """
+    # Averages the tier's base score with how well the student actually
+    # performs at that tier, so being parked at "hard" but doing badly there
+    # doesn't score full marks just for the tier, and doing great at "easy"
+    # isn't penalized down to the tier's low base score.
     base = base_scores.get(current_difficulty, neutral_score)
     performance = neutral_score if accuracy_at_current_difficulty is None else accuracy_at_current_difficulty
     return _clamp((base + performance) / 2.0)
@@ -117,14 +70,9 @@ def compute_retention_score(
     *,
     neutral_score: float,
 ) -> float:
-    """
-    Directly the repeated-question mistake_correction_rate (see
-    scoring_service.aggregate_repeated_question_stats()) when any repeated-
-    question data exists, else `neutral_score` — a rate of exactly 0.0 is
-    ambiguous on its own (it's the same value used both for "every repeat
-    was a repeated mistake" and "there were no repeats to measure at all"),
-    so the counts are checked explicitly to tell those two cases apart.
-    """
+    # A correction rate of exactly 0.0 is ambiguous on its own (could mean
+    # "every repeat was still wrong" or "there were no repeats at all"), so
+    # the counts are checked explicitly to tell those two cases apart.
     if corrected_previous_mistakes + repeated_same_mistakes == 0:
         return neutral_score
     return _clamp(mistake_correction_rate)
@@ -136,13 +84,8 @@ def compute_consistency_score(
     min_sessions: int,
     neutral_score: float,
 ) -> float:
-    """
-    100 minus the sample standard deviation of per-session accuracy
-    percentages — a student whose completed-session scores barely vary
-    scores near 100 here; one who swings wildly session to session scores
-    lower. Requires at least `min_sessions` completed sessions with graded
-    attempts to be meaningful; below that, `neutral_score` is used instead.
-    """
+    # 100 minus the standard deviation of per-session accuracy — scores that
+    # barely vary session to session land near 100, wild swings score lower.
     if len(session_accuracies) < min_sessions:
         return neutral_score
     stdev = statistics.stdev(session_accuracies)
@@ -173,21 +116,9 @@ def build_mastery_analytics(
     proficient_threshold: float,
     advanced_threshold: float,
 ) -> dict:
-    """
-    Orchestrates the full mastery calculation for ONE scope (a subject or a
-    topic) from already-gathered primitives — see analytics_service.
-    get_user_analytics() for where each input comes from. Purely a
-    computation: never touches the DB, never mutates SubjectMastery/
-    LessonMastery, and has no knowledge of "subject" vs "topic" — the caller
-    decides what scope's numbers to pass in.
-
-    Returns:
-        {
-            "mastery_score": float | None,    # None if total_attempted < min_attempts
-            "mastery_level": str,             # "insufficient_data" in that case
-            "mastery_components": dict | None,
-        }
-    """
+    # Runs the full mastery calculation for one subject or topic from
+    # already-gathered numbers — never touches the DB, has no idea whether
+    # it's scoring a subject or a topic, just crunches whatever it's given.
     if total_attempted < min_attempts:
         return {
             "mastery_score": None,

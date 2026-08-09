@@ -1,16 +1,3 @@
-"""
-services/analytics/subject_service.py
-────────────────────────────────────────
-SubjectAnalyticsService — assembles subjects[] (see UserAnalyticsResponse):
-per-subject accuracy/response-time/behavior, difficulty_performance,
-weak_topic derivation, and — since it already has every subject's Analytics
-row in hand for ranking — strong_subjects/weak_subjects.
-
-Also builds difficulty_performance_by_subject from the raw
-DifficultyAttemptRow/DifficultySessionRow query results — this is pure
-grouping/shaping (accuracy = correct/attempted), not a new formula, kept
-here because difficulty_performance is a field directly on each subject.
-"""
 from app.core.config import settings
 from app.models.analytics import Analytics
 from app.models.subject_mastery import SubjectMastery
@@ -72,23 +59,16 @@ class SubjectAnalyticsService:
         self._max_topics = max_topics
 
     def _derive_weak_topic(self, subject: str, legacy_weak_topic: str | None) -> str | None:
-        """
-        Kept for backwards compatibility but now DERIVED from the lowest-
-        accuracy topic that isn't "insufficient_data" (falling back to the
-        legacy Analytics.weak_topic if none qualify) — computed from the
-        FULL topic list (already sorted ascending by accuracy — see
-        TopicAnalyticsService.sort_topics(), which orchestrator.py runs
-        before this service), so a topic outside the top-N-weakest-shown
-        can still "win".
-        """
+        # Now derived from the lowest-accuracy topic that isn't
+        # "insufficient_data" (falling back to the legacy Analytics.weak_topic
+        # if none qualify) — read from the FULL topic list, already sorted
+        # ascending by accuracy, so a topic beyond the shown top-N can still win.
         eligible = [t for t in self._topics_by_subject.get(subject, []) if t["status"] != "insufficient_data"]
         if eligible:
             return eligible[0]["topic"]
         return legacy_weak_topic
 
     def build(self) -> tuple[list[dict], list[str], list[str]]:
-        """Returns (subjects_data, strong_subjects, weak_subjects) — subjects
-        ordered best -> worst accuracy, split at the midpoint."""
         sorted_rows = sorted(self._rows, key=lambda r: r.accuracy, reverse=True)
         midpoint = len(sorted_rows) // 2
         strong_subjects = [r.subject for r in sorted_rows[:midpoint]] if sorted_rows else []
