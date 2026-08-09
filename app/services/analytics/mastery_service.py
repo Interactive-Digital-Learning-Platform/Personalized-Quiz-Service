@@ -1,13 +1,3 @@
-"""
-services/analytics/mastery_service.py
-────────────────────────────────────────
-MasteryScoreService — orchestrates app.services.mastery_service's pure
-formula (build_mastery_analytics et al.) for the subject/topic scopes,
-gathering the inputs each needs from the topic-difficulty query results.
-Contains no scoring formula of its own — see app/services/mastery_service.py
-for that (imported below as `mastery_formulas` to keep the two distinct
-"mastery_service" modules unambiguous at the call sites in this file).
-"""
 from app.core.config import settings
 from app.services import difficulty_service
 from app.services import mastery_service as mastery_formulas
@@ -15,10 +5,11 @@ from app.services.analytics.types import TopicDifficultyRow
 
 
 class MasteryScoreService:
+    # Gathers the right inputs for app.services.mastery_service's pure
+    # formula and calls it for the subject/topic scopes — no scoring logic
+    # of its own.
+
     def __init__(self, topic_difficulty_rows: list[TopicDifficultyRow]):
-        # Per-(subject, topic, difficulty) accuracy — used only to feed a
-        # topic's difficulty_score component. Not derived from LessonMastery
-        # — see queries.fetch_topic_difficulty_rows()'s docstring for why.
         self._topic_difficulty_accuracy: dict[tuple[str, str, str], float] = {}
         for row in topic_difficulty_rows:
             if row.total_attempted > 0:
@@ -72,9 +63,8 @@ class MasteryScoreService:
 
     @staticmethod
     def _recent_performance(trend: dict, accuracy: float) -> float:
-        """recent_performance_score: the trend's current-period accuracy
-        when it's meaningful, else this scope's own overall accuracy as the
-        best available estimate of "recent" performance."""
+        # Uses the trend's current-period accuracy when it's meaningful,
+        # else falls back to this scope's overall accuracy.
         return trend["current_period_accuracy"] if trend["method"] != "insufficient_data" else accuracy
 
     @staticmethod

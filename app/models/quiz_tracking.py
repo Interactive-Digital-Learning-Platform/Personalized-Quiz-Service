@@ -13,11 +13,6 @@ if TYPE_CHECKING:
 
 
 class QuizProgressSnapshot(Base):
-    """
-    Stores resumable in-progress quiz state (for app exits/disconnects).
-    Multiple snapshots can exist per session; use the latest by saved_at.
-    """
-
     __tablename__ = "quiz_progress_snapshots"
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
@@ -43,11 +38,6 @@ class QuizProgressSnapshot(Base):
 
 
 class QuizCompletion(Base):
-    """
-    Stores final outcome and analytics for a completed quiz session.
-    One row per session (submitted or timeout).
-    """
-
     __tablename__ = "quiz_completions"
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)

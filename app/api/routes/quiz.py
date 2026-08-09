@@ -1,12 +1,5 @@
-"""
-api/routes/quiz.py
-──────────────────
-Quiz-related API endpoints:
-
-    POST /quiz/generate  — Generate a quiz (DB-cached or AI-generated)
-    POST /quiz/submit    — Submit answers and get scoring results
-"""
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
@@ -40,13 +33,8 @@ from app.services.quiz_service import (
 
 logger = logging.getLogger(__name__)
 
-# All routes in this file are prefixed with /quiz
 router = APIRouter(prefix="/quiz", tags=["Quiz"])
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# POST /quiz/generate
-# ─────────────────────────────────────────────────────────────────────────────
 
 @router.post(
     "/generate",
@@ -61,16 +49,9 @@ router = APIRouter(prefix="/quiz", tags=["Quiz"])
 )
 async def generate_quiz_endpoint(
     payload: GenerateQuizRequest,
-    # `get_current_user` verifies the Clerk JWT and returns the decoded payload
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> GenerateQuizResponse:
-    """
-    Flow:
-    1. Extract Clerk user ID from the verified JWT payload.
-    2. Delegate to quiz_service.generate_quiz (which handles caching + AI call).
-    3. Build and return the response — note we NEVER include correct_answer here.
-    """
     clerk_id: str = current_user.get("sub", "")
     if not clerk_id:
         raise HTTPException(
@@ -89,8 +70,7 @@ async def generate_quiz_endpoint(
         payload=payload,
     )
 
-    # Convert ORM Question objects to Pydantic response schemas
-    # IMPORTANT: correct_answer is intentionally excluded in QuestionOut
+    # QuestionOut never carries correct_answer — don't let it leak to the client here.
     question_out = [QuestionOut.model_validate(q) for q in questions]
 
     return GenerateQuizResponse(
@@ -101,10 +81,6 @@ async def generate_quiz_endpoint(
         lesson=lesson,
     )
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# GET /quiz/sessions  — list all sessions for the current user
-# ─────────────────────────────────────────────────────────────────────────────
 
 @router.get(
     "/sessions",
@@ -131,7 +107,7 @@ async def list_quiz_sessions(
             selectinload(QuizSession.completion),
             selectinload(QuizSession.progress_snapshots),
         )
-        .where(QuizSession.user_id == user.id)
+        .where(QuizSession.user_id == user.id, QuizSession.deleted_at.is_(None))
         .order_by(QuizSession.created_at.desc())
     )
     sessions = list(sessions_result.scalars().all())
@@ -166,10 +142,6 @@ async def list_quiz_sessions(
     return summaries
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# GET /quiz/sessions/{session_id}
-# ─────────────────────────────────────────────────────────────────────────────
-
 @router.get(
     "/sessions/{session_id}",
     response_model=SavedQuizResponse,
@@ -194,6 +166,7 @@ async def get_saved_quiz_session(
     session_stmt = select(QuizSession).where(
         QuizSession.id == session_id,
         QuizSession.user_id == user.id,
+        QuizSession.deleted_at.is_(None),
     )
     result = await db.execute(session_stmt)
     session = result.scalar_one_or_none()
@@ -268,13 +241,6 @@ async def get_saved_quiz_session(
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DELETE /quiz/sessions/{session_id}
-# Deletes the quiz session and all related records (attempts, snapshots,
-# completion). The aggregated Analytics table is unaffected, so historical
-# subject-level accuracy is preserved.
-# ─────────────────────────────────────────────────────────────────────────────
-
 @router.delete(
     "/sessions/{session_id}",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -285,6 +251,7 @@ async def delete_quiz_session(
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
+    # We don't actually delete the row here — see the comment further down.
     clerk_id: str = current_user.get("sub", "")
     if not clerk_id:
         raise HTTPException(
@@ -298,6 +265,7 @@ async def delete_quiz_session(
         select(QuizSession).where(
             QuizSession.id == session_id,
             QuizSession.user_id == user.id,
+            QuizSession.deleted_at.is_(None),
         )
     )
     session = result.scalar_one_or_none()
@@ -307,8 +275,18 @@ async def delete_quiz_session(
             detail="Session not found or does not belong to this user.",
         )
 
-    await db.delete(session)
+    # This is a soft delete (just stamping deleted_at) instead of a real DELETE.
+    # The row needs to stick around because quiz generation still leans on it
+    # for lesson-variety history, and the difficulty-adaptation tables key off
+    # of it too — losing that data on delete would make the AI forget what
+    # you've already studied.
+    session.deleted_at = datetime.now(timezone.utc)
     await db.commit()
+
+    # The old per-subject Analytics row only updates when you submit a quiz,
+    # so if we don't touch it here it'll keep counting this session's answers
+    # until the next submission overwrites it. Recompute it now so it's not stale.
+    await update_analytics_after_submission(db=db, clerk_id=clerk_id, session_id=session_id)
 
 
 @router.post(
@@ -337,10 +315,6 @@ async def save_progress_endpoint(
     return SaveProgressResponse(**progress)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# POST /quiz/submit
-# ─────────────────────────────────────────────────────────────────────────────
-
 @router.post(
     "/submit",
     response_model=SubmitQuizResponse,
@@ -357,14 +331,6 @@ async def submit_quiz_endpoint(
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> SubmitQuizResponse:
-    """
-    Flow:
-    1. Grade all answers server-side (correct_answer fetched from DB).
-    2. Persist QuestionAttempt rows.
-    3. Update QuizSession with aggregate metrics.
-    4. Trigger analytics upsert for the user's profile.
-    5. Return computed results immediately.
-    """
     clerk_id: str = current_user.get("sub", "")
     if not clerk_id:
         raise HTTPException(
@@ -377,10 +343,8 @@ async def submit_quiz_endpoint(
         clerk_id, payload.session_id, len(payload.answers),
     )
 
-    # Grade the submission and persist attempts
     metrics = await submit_quiz(db=db, clerk_id=clerk_id, payload=payload)
 
-    # Update the analytics table (upsert) — non-blocking best-effort
     try:
         await update_analytics_after_submission(
             db=db,
@@ -388,7 +352,8 @@ async def submit_quiz_endpoint(
             session_id=payload.session_id,
         )
     except Exception as exc:
-        # Analytics update failure should NOT fail the submission response
+        # If analytics fails to update, the quiz result should still go through —
+        # the user just cares about seeing their score right now.
         logger.error("Analytics update failed (non-critical): %s", exc)
 
     return SubmitQuizResponse(**metrics)

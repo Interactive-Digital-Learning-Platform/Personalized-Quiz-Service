@@ -1,20 +1,3 @@
-"""
-services/analytics/queries.py
-────────────────────────────────
-ALL database access for GET /analytics/me, in one place.
-
-Every function here is a single, bounded, aggregate SQL statement scoped to
-one user via `user_id` — never a loop issuing one query per subject/topic/
-session (see orchestrator.py's docstring for the full query count and why
-it stays fixed no matter how much data the user has). Nothing in this
-module performs business-rule calculations (rates, thresholds, formulas) —
-it only shapes raw query results into the typed dataclasses in types.py;
-the 8 orchestration services derive everything else from those.
-
-This is a line-for-line move of queries that already existed in
-app/services/analytics_service.py before this refactor — no query was
-added, removed, or changed.
-"""
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import Integer, and_, case, cast, func, select
@@ -40,32 +23,29 @@ from app.services.analytics.types import (
     TrendAttemptRow,
 )
 
-# Normalized label used whenever a question's stored `lesson` is missing/blank.
+# Every query below filters QuizSession.deleted_at IS NULL — this endpoint is
+# a dashboard of the user's CURRENT sessions, so a soft-deleted one (see
+# DELETE /quiz/sessions/{id}) must disappear from every number here, not just
+# the sessions list. That's deliberately different from quiz_service.
+# _get_recent_lessons() and the SubjectMastery/LessonMastery tables, which
+# keep reading through deleted sessions since those drive quiz generation
+# and must never lose history just because the user tidied up their list.
+
 UNKNOWN_TOPIC = "Unknown Topic"
 
 
 def as_utc(dt: datetime) -> datetime:
-    """Treat a naive datetime as UTC (SQLite drops tzinfo on read; every
-    timestamp this app writes — server_default=func.now() — is UTC anyway)."""
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
 def _topic_expr():
-    """Question.lesson, normalized: blank/whitespace-only collapses to
-    UNKNOWN_TOPIC. Shared by every query below that groups by topic, so a
-    topic label is computed identically everywhere it appears."""
     return func.coalesce(func.nullif(func.trim(Question.lesson), ""), UNKNOWN_TOPIC)
 
 
 def valid_response_time_case():
-    """
-    SQL CASE expression yielding QuestionAttempt.response_time when it's
-    valid (non-negative, not absurdly large) and NULL otherwise — so
-    func.avg()/func.sum() over it silently ignore invalid rows without
-    shrinking a query's other aggregates that share the same WHERE clause.
-    Raw QuestionAttempt rows are never modified — this only affects what a
-    given aggregate function reads from at calculation time.
-    """
+    # NULLs out an invalid response_time so avg()/sum() over it skips those
+    # rows without shrinking any other aggregate sharing the same WHERE
+    # clause. Never touches the raw stored value.
     return case(
         (
             and_(
@@ -79,41 +59,21 @@ def valid_response_time_case():
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 1-2. Analytics + SubjectMastery rows (per subject)
-# ─────────────────────────────────────────────────────────────────────────────
-
 async def fetch_analytics_rows(db: AsyncSession, user_id: int) -> list[Analytics]:
     stmt = select(Analytics).where(Analytics.user_id == user_id)
     return list((await db.execute(stmt)).scalars().all())
 
 
 async def fetch_subject_mastery_by_subject(db: AsyncSession, user_id: int) -> dict[str, SubjectMastery]:
-    """Read-only — GET /analytics/me never writes to SubjectMastery; only
-    difficulty_service.update_subject_mastery_after_submission() does."""
     stmt = select(SubjectMastery).where(SubjectMastery.user_id == user_id)
     rows = list((await db.execute(stmt)).scalars().all())
     return {m.subject: m for m in rows}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 3-6. Session completion stats (total / completed / timed-out / avg duration /
-#      avg questions per session / incomplete+abandoned)
-# ─────────────────────────────────────────────────────────────────────────────
-
 async def fetch_session_completion_stats(db: AsyncSession, user_id: int) -> SessionCompletionStats:
-    """
-    Combines what used to be 4 separate query round-trips in the
-    pre-refactor function (total session count, completion/timeout/duration
-    aggregate, average questions per session, incomplete-session activity)
-    — still exactly 4 queries, just gathered behind one typed return value.
-
-    See AnalyticsSummaryService for the abandonment/completion-rate
-    classification rules this feeds into.
-    """
     total_sessions: int = int(
         (await db.execute(
-            select(func.count(QuizSession.id)).where(QuizSession.user_id == user_id)
+            select(func.count(QuizSession.id)).where(QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None))
         )).scalar_one() or 0
     )
 
@@ -124,14 +84,11 @@ async def fetch_session_completion_stats(db: AsyncSession, user_id: int) -> Sess
             func.avg(QuizCompletion.total_time).label("avg_duration"),
         )
         .join(QuizSession, QuizSession.id == QuizCompletion.session_id)
-        .where(QuizSession.user_id == user_id)
+        .where(QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None))
     )
     completion_row = (await db.execute(completion_stmt)).one()
-    # NOTE: Postgres can return SUM()/CASE-aggregate results as
-    # decimal.Decimal rather than a plain int (asyncpg maps numeric-typed
-    # aggregates that way), which breaks later float arithmetic — SQLite
-    # doesn't have this issue, so this only shows up against the real DB.
-    # Explicitly convert to `int` right here rather than relying on `or 0`
+    # Postgres can return SUM()/CASE aggregates as Decimal rather than plain
+    # int (SQLite doesn't do this) — explicit int() here rather than `or 0`
     # alone, which only masks the type when the result happens to be zero.
     completed_sessions = int(completion_row.completed_total or 0)
     timed_out_sessions = int(completion_row.timed_out_total or 0)
@@ -139,18 +96,16 @@ async def fetch_session_completion_stats(db: AsyncSession, user_id: int) -> Sess
 
     average_questions_per_session = round(
         float((await db.execute(
-            select(func.avg(QuizSession.question_count)).where(QuizSession.user_id == user_id)
+            select(func.avg(QuizSession.question_count)).where(QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None))
         )).scalar_one() or 0.0),
         2,
     )
 
-    # Abandoned: incomplete sessions inactive longer than the threshold.
-    # Loads one row per INCOMPLETE session (bounded by total_sessions, not by
-    # attempt volume), then does the "older than N hours" comparison in
-    # Python with explicit UTC normalization — SQLite (used in tests/local
-    # dev) drops tzinfo on read, and comparing that against a tz-aware
-    # cutoff safely is simpler and more portable done here than as raw SQL
-    # across two dialects.
+    # Abandoned = incomplete session inactive longer than the threshold.
+    # Loads one row per incomplete session, then does the "older than N
+    # hours" check in Python with explicit UTC normalization — SQLite drops
+    # tzinfo on read, so comparing against a tz-aware cutoff is simpler done
+    # here than as raw SQL across two dialects.
     last_snapshot_subq = (
         select(
             QuizProgressSnapshot.session_id.label("session_id"),
@@ -168,7 +123,7 @@ async def fetch_session_completion_stats(db: AsyncSession, user_id: int) -> Sess
         .outerjoin(QuizCompletion, QuizCompletion.session_id == QuizSession.id)
         .outerjoin(last_snapshot_subq, last_snapshot_subq.c.session_id == QuizSession.id)
         .where(
-            QuizSession.user_id == user_id,
+            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None),
             QuizCompletion.id.is_(None),
         )
     )
@@ -204,17 +159,10 @@ async def fetch_session_completion_stats(db: AsyncSession, user_id: int) -> Sess
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 7-8. Graded totals (correct/incorrect/unanswered) — the source of truth for
-#      overall_accuracy
-# ─────────────────────────────────────────────────────────────────────────────
-
 async def fetch_graded_totals(db: AsyncSession, user_id: int) -> GradedTotals:
-    """
-    Weighted, attempt-level totals — deliberately NOT an average of each
-    subject's own accuracy (see AnalyticsSummaryService's docstring for why
-    that distinction matters).
-    """
+    # Weighted, attempt-level totals — deliberately not an average of each
+    # subject's own accuracy, which would let a 2-question subject count as
+    # much as a 50-question one.
     graded_stmt = (
         select(
             func.count(QuestionAttempt.id).label("graded_total"),
@@ -222,7 +170,7 @@ async def fetch_graded_totals(db: AsyncSession, user_id: int) -> GradedTotals:
         )
         .join(QuizSession, QuizSession.id == QuestionAttempt.session_id)
         .where(
-            QuizSession.user_id == user_id,
+            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None),
             QuestionAttempt.correct.is_not(None),
         )
     )
@@ -231,10 +179,8 @@ async def fetch_graded_totals(db: AsyncSession, user_id: int) -> GradedTotals:
     total_correct_answers = int(graded_row.correct_sum or 0)
     total_incorrect_answers = graded_total - total_correct_answers
 
-    # Unanswered questions: session.question_count vs recorded attempts.
-    # Per-session attempt counts via a subquery, then compare against how
-    # many questions that session actually had. Still a single aggregate
-    # query — no per-attempt or per-session rows are loaded into Python.
+    # Unanswered = session.question_count minus recorded attempts per
+    # session, via subquery — still a single aggregate query.
     attempt_counts_subq = (
         select(
             QuestionAttempt.session_id.label("session_id"),
@@ -248,7 +194,7 @@ async def fetch_graded_totals(db: AsyncSession, user_id: int) -> GradedTotals:
         select(func.coalesce(func.sum(case((missing_expr > 0, missing_expr), else_=0)), 0))
         .select_from(QuizSession)
         .outerjoin(attempt_counts_subq, attempt_counts_subq.c.session_id == QuizSession.id)
-        .where(QuizSession.user_id == user_id)
+        .where(QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None))
     )
     total_unanswered_questions = int((await db.execute(unanswered_stmt)).scalar_one() or 0)
 
@@ -270,20 +216,10 @@ async def fetch_graded_totals(db: AsyncSession, user_id: int) -> GradedTotals:
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 9. Per-topic breakdown
-# ─────────────────────────────────────────────────────────────────────────────
-
 async def fetch_topic_rows(db: AsyncSession, user_id: int) -> list[TopicRow]:
-    """
-    Grouped by (question.subject, question.lesson) — NOT QuizSession.lesson,
-    since one session can span multiple lessons (see quiz_service.py's
-    random-per-question lesson assignment). `last_attempted_at` prefers each
-    attempt's QuizCompletion.completed_at (always present in practice —
-    attempts are only ever created inside submit_quiz(), in the same
-    transaction as the QuizCompletion row); QuizSession.created_at is a
-    defensive fallback only.
-    """
+    # Grouped by Question.subject/lesson, not QuizSession.lesson — one
+    # session can span multiple lessons since each question gets its own
+    # random lesson at generation time.
     topic_expr = _topic_expr()
     stmt = (
         select(
@@ -300,7 +236,7 @@ async def fetch_topic_rows(db: AsyncSession, user_id: int) -> list[TopicRow]:
         .join(Question, Question.id == QuestionAttempt.question_id)
         .outerjoin(QuizCompletion, QuizCompletion.session_id == QuizSession.id)
         .where(
-            QuizSession.user_id == user_id,
+            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None),
             QuestionAttempt.correct.is_not(None),
         )
         .group_by(Question.subject, topic_expr)
@@ -318,21 +254,10 @@ async def fetch_topic_rows(db: AsyncSession, user_id: int) -> list[TopicRow]:
     ]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 10. Response-time raw rows (validity-filtered)
-# ─────────────────────────────────────────────────────────────────────────────
-
 async def fetch_response_time_rows(db: AsyncSession, user_id: int) -> list[ResponseTimeRow]:
-    """
-    One bounded fetch of every VALID response time this user has (negative,
-    null, and implausibly-large values excluded via the WHERE clause here —
-    raw QuestionAttempt rows are never touched). median/stddev genuinely
-    can't be recombined from grouped sub-aggregates (a median of a union
-    isn't derivable from its parts' medians), so a single Python-side pass
-    over this one list computes every scope (overall/subject/topic) — see
-    scoring_service.compute_median_and_stddev() for why that's plain Python
-    rather than dialect-specific SQL.
-    """
+    # Every valid response time this user has, unaggregated — median/stddev
+    # can't be recombined from grouped sub-aggregates, so one Python-side
+    # pass over this list computes every scope (overall/subject/topic).
     topic_expr = _topic_expr()
     stmt = (
         select(
@@ -345,7 +270,7 @@ async def fetch_response_time_rows(db: AsyncSession, user_id: int) -> list[Respo
         .join(QuizSession, QuizSession.id == QuestionAttempt.session_id)
         .join(Question, Question.id == QuestionAttempt.question_id)
         .where(
-            QuizSession.user_id == user_id,
+            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None),
             QuestionAttempt.correct.is_not(None),
             QuestionAttempt.response_time.is_not(None),
             QuestionAttempt.response_time >= 0,
@@ -359,10 +284,6 @@ async def fetch_response_time_rows(db: AsyncSession, user_id: int) -> list[Respo
     ]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 11-12. Performance trend raw data
-# ─────────────────────────────────────────────────────────────────────────────
-
 async def fetch_session_completed_at(db: AsyncSession, user_id: int) -> dict[int, datetime]:
     stmt = (
         select(
@@ -371,15 +292,13 @@ async def fetch_session_completed_at(db: AsyncSession, user_id: int) -> dict[int
         )
         .select_from(QuizSession)
         .join(QuizCompletion, QuizCompletion.session_id == QuizSession.id)
-        .where(QuizSession.user_id == user_id)
+        .where(QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None))
     )
     rows = (await db.execute(stmt)).all()
     return {row.session_id: as_utc(row.completed_at) for row in rows}
 
 
 async def fetch_trend_attempt_rows(db: AsyncSession, user_id: int) -> list[TrendAttemptRow]:
-    """Graded attempts belonging to a COMPLETED session only — trend is
-    defined over completed sessions (see scoring_service.compute_performance_trend)."""
     topic_expr = _topic_expr()
     stmt = (
         select(
@@ -393,7 +312,7 @@ async def fetch_trend_attempt_rows(db: AsyncSession, user_id: int) -> list[Trend
         .join(Question, Question.id == QuestionAttempt.question_id)
         .join(QuizCompletion, QuizCompletion.session_id == QuizSession.id)
         .where(
-            QuizSession.user_id == user_id,
+            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None),
             QuestionAttempt.correct.is_not(None),
         )
     )
@@ -404,19 +323,10 @@ async def fetch_trend_attempt_rows(db: AsyncSession, user_id: int) -> list[Trend
     ]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 13. Repeated-question raw rows (chronologically ordered)
-# ─────────────────────────────────────────────────────────────────────────────
-
 async def fetch_repeated_attempt_rows(db: AsyncSession, user_id: int) -> list[RepeatedAttemptRow]:
-    """
-    Chronological ordering uses (QuizSession.created_at, QuestionAttempt.id)
-    — QuestionAttempt has no per-attempt timestamp of its own in this
-    schema, so session creation time plus the attempt's own insertion-order
-    primary key (a stable, deterministic tiebreak for attempts within the
-    same session) is the best available proxy, and is exact for the common
-    case of one attempt per session on a given fingerprint.
-    """
+    # Ordered by (session.created_at, attempt.id) since QuestionAttempt has
+    # no timestamp of its own — session creation time plus insertion-order
+    # id is the best available chronological proxy.
     topic_expr = _topic_expr()
     stmt = (
         select(
@@ -431,7 +341,7 @@ async def fetch_repeated_attempt_rows(db: AsyncSession, user_id: int) -> list[Re
         .join(QuizSession, QuizSession.id == QuestionAttempt.session_id)
         .join(Question, Question.id == QuestionAttempt.question_id)
         .where(
-            QuizSession.user_id == user_id,
+            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None),
             QuestionAttempt.correct.is_not(None),
         )
         .order_by(QuizSession.created_at.asc(), QuestionAttempt.id.asc())
@@ -446,18 +356,9 @@ async def fetch_repeated_attempt_rows(db: AsyncSession, user_id: int) -> list[Re
     ]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 14-16. Difficulty-level raw rows
-# ─────────────────────────────────────────────────────────────────────────────
-
 async def fetch_difficulty_attempt_rows(db: AsyncSession, user_id: int) -> list[DifficultyAttemptRow]:
-    """
-    Grouped by each QUESTION's own `difficulty` (not QuizSession.difficulty)
-    — every question in a session shares the session's difficulty in this
-    app's current generation flow, but grouping at the question level
-    handles a mixed-difficulty session correctly too, rather than assuming
-    session-level uniformity that might not always hold.
-    """
+    # Grouped by each question's own difficulty (not the session's), so a
+    # session mixing difficulty levels is still split correctly.
     stmt = (
         select(
             QuizSession.subject.label("subject"),
@@ -470,7 +371,7 @@ async def fetch_difficulty_attempt_rows(db: AsyncSession, user_id: int) -> list[
         .join(QuizSession, QuizSession.id == QuestionAttempt.session_id)
         .join(Question, Question.id == QuestionAttempt.question_id)
         .where(
-            QuizSession.user_id == user_id,
+            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None),
             QuestionAttempt.correct.is_not(None),
         )
         .group_by(QuizSession.subject, Question.difficulty)
@@ -487,13 +388,6 @@ async def fetch_difficulty_attempt_rows(db: AsyncSession, user_id: int) -> list[
 
 
 async def fetch_difficulty_session_rows(db: AsyncSession, user_id: int) -> list[DifficultySessionRow]:
-    """
-    Distinct COMPLETED sessions per (subject, difficulty). A session with
-    graded attempts at more than one difficulty — if that's ever possible —
-    correctly counts toward every difficulty bucket it touches, since this
-    is a separate GROUP BY over the same join, not derived from
-    fetch_difficulty_attempt_rows().
-    """
     stmt = (
         select(
             QuizSession.subject.label("subject"),
@@ -505,7 +399,7 @@ async def fetch_difficulty_session_rows(db: AsyncSession, user_id: int) -> list[
         .join(Question, Question.id == QuestionAttempt.question_id)
         .join(QuizCompletion, QuizCompletion.session_id == QuizSession.id)
         .where(
-            QuizSession.user_id == user_id,
+            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None),
             QuestionAttempt.correct.is_not(None),
         )
         .group_by(QuizSession.subject, Question.difficulty)
@@ -520,14 +414,8 @@ async def fetch_difficulty_session_rows(db: AsyncSession, user_id: int) -> list[
 
 
 async def fetch_topic_difficulty_rows(db: AsyncSession, user_id: int) -> list[TopicDifficultyRow]:
-    """
-    Per-(subject, topic, difficulty) accuracy — used only to feed topic-
-    level mastery's difficulty_score component (see MasteryScoreService).
-    Deliberately not sourced from LessonMastery: its `lesson` column stores
-    the raw lesson string, which isn't guaranteed to match the normalized
-    topic label used throughout this endpoint (blank/whitespace lessons
-    collapse to "Unknown Topic" here, but not necessarily in LessonMastery).
-    """
+    # Not sourced from LessonMastery — its `lesson` column is the raw string,
+    # which isn't guaranteed to match the normalized topic label used here.
     topic_expr = _topic_expr()
     stmt = (
         select(
@@ -541,7 +429,7 @@ async def fetch_topic_difficulty_rows(db: AsyncSession, user_id: int) -> list[To
         .join(QuizSession, QuizSession.id == QuestionAttempt.session_id)
         .join(Question, Question.id == QuestionAttempt.question_id)
         .where(
-            QuizSession.user_id == user_id,
+            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None),
             QuestionAttempt.correct.is_not(None),
         )
         .group_by(QuizSession.subject, topic_expr, Question.difficulty)
@@ -555,10 +443,6 @@ async def fetch_topic_difficulty_rows(db: AsyncSession, user_id: int) -> list[To
         for r in rows
     ]
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 17-18. Growth rolling-window raw rows
-# ─────────────────────────────────────────────────────────────────────────────
 
 async def fetch_growth_session_rows(
     db: AsyncSession, user_id: int, window_start: datetime,
@@ -581,7 +465,7 @@ async def fetch_growth_session_rows(
         .select_from(QuizSession)
         .outerjoin(QuizCompletion, QuizCompletion.session_id == QuizSession.id)
         .outerjoin(last_snapshot_subq, last_snapshot_subq.c.session_id == QuizSession.id)
-        .where(QuizSession.user_id == user_id, QuizSession.created_at >= window_start)
+        .where(QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None), QuizSession.created_at >= window_start)
     )
     rows = (await db.execute(stmt)).all()
     return [
@@ -596,13 +480,9 @@ async def fetch_growth_session_rows(
 async def fetch_growth_attempt_rows(
     db: AsyncSession, user_id: int, window_start: datetime,
 ) -> list[GrowthAttemptRow]:
-    """
-    Graded attempts within the window — the ONLY source for effort's
-    attempted_question_count/active_learning_days/session-spacing, so a
-    rapidly created, unanswered session contributes to none of them (it can
-    only ever hurt completion_rate/abandonment, computed from
-    fetch_growth_session_rows() instead).
-    """
+    # The only source for effort's question-count/active-days/spacing
+    # components, so a rapidly-created unanswered session contributes to
+    # none of them — it can only hurt completion_rate/abandonment instead.
     topic_expr = _topic_expr()
     stmt = (
         select(
@@ -616,7 +496,7 @@ async def fetch_growth_attempt_rows(
         .join(QuizSession, QuizSession.id == QuestionAttempt.session_id)
         .join(Question, Question.id == QuestionAttempt.question_id)
         .where(
-            QuizSession.user_id == user_id,
+            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None),
             QuestionAttempt.correct.is_not(None),
             QuizSession.created_at >= window_start,
         )

@@ -1,25 +1,3 @@
-"""
-services/groq_service.py
-────────────────────────
-All interactions with the Groq API are centralised here.
-
-Two responsibilities:
-1. `generate_questions()` — Given quiz parameters, return a structured list of
-   MCQ questions by prompting Groq's LLaMA 3 70B model. When no `lesson` is
-   given, each question is independently assigned a different, randomly
-   varied lesson/topic within the subject — quizzes are NOT pinned to one
-   pre-selected lesson.
-2. `generate_feedback()` — Given a user's analytics summary, return personalised
-   AI study suggestions.
-
-Design principles:
-- Use Groq's **official Python SDK** (not raw httpx) for reliability.
-- Force strict JSON output via `response_format={"type": "json_object"}` and
-  explicit JSON schema in the system prompt.
-- Validate and sanitise all AI output before returning — never trust raw LLM output.
-- Raise `HTTPException` with a clear 502 status on Groq failures so the caller
-  can surface a meaningful error to the frontend.
-"""
 import asyncio
 import json
 import logging
@@ -40,26 +18,18 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# ── Groq client (module-level singleton) ──────────────────────────────────────
-# AsyncGroq is the async version of the Groq client — works natively in FastAPI.
 _groq_client = AsyncGroq(api_key=settings.GROQ_API_KEY)
 
-# Only these are worth retrying — rate limit, timeout, dropped connection, and
-# Groq-side 5xx are all transient. AuthenticationError/BadRequestError/etc.
-# (the rest of GroqError) would just fail the same way every time, so they're
-# left to raise immediately via the plain `except GroqError` below.
+# Only these are worth retrying — rate limits, timeouts, dropped connections,
+# and Groq-side 5xx are transient. Everything else (bad auth, bad request)
+# would just fail the same way again, so those raise immediately instead.
 _TRANSIENT_GROQ_ERRORS = (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError)
 
 
 async def _create_chat_completion_with_retry(*, messages: list[dict]):
-    """
-    Calls Groq's chat-completions endpoint, retrying only transient errors
-    with exponential backoff + jitter (GROQ_MAX_RETRIES attempts beyond the
-    first, base delay GROQ_RETRY_BASE_DELAY_SECONDS). Without this, a single
-    rate-limit blip turned an otherwise-successful quiz generation into an
-    immediate failure — see quiz_service.generate_quiz()'s cache-fallback
-    path, which used to be reached far more often than it should have been.
-    """
+    # Retries transient Groq errors with backoff + jitter. Without this, one
+    # rate-limit blip used to fail the whole quiz generation and fall back to
+    # the (often near-empty) DB cache far more often than it should have.
     last_exc: Exception | None = None
     for attempt in range(settings.GROQ_MAX_RETRIES + 1):
         try:
@@ -83,10 +53,6 @@ async def _create_chat_completion_with_retry(*, messages: list[dict]):
     raise last_exc
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. QUESTION GENERATION
-# ─────────────────────────────────────────────────────────────────────────────
-
 async def generate_questions(
     grade: int,
     subject: str,
@@ -97,45 +63,17 @@ async def generate_questions(
     avoid_lessons: list[str] | None = None,
     telemetry: dict | None = None,
 ) -> list[dict]:
-    """
-    Call Groq to generate `question_count` multiple-choice questions.
-
-    `lesson` — if given, EVERY question is drawn from this one specific topic
-    (manual override / narrow practice mode). If omitted (the default), each
-    question is independently assigned a DIFFERENT, randomly varied lesson
-    from across the subject's syllabus — quizzes are NOT pinned to a single
-    pre-selected lesson.
-
-    `existing_questions` — texts of questions already in the DB for this
-    subject (+ lesson, if fixed) at this difficulty. Passed to the model so it
-    can explicitly avoid repeating them.
-
-    `avoid_lessons` — only used when `lesson` is None. Lessons this user was
-    recently quizzed on for this subject, so repeated generations get lesson
-    variety across sessions too, not just within one quiz.
-
-    `telemetry` — optional mutable dict; if given, this call ADDS its own
-    invalid-question count onto `telemetry["invalid_question_count"]` (raw
-    questions Groq returned that failed validation — see quiz_service.
-    generate_quiz(), which is the only caller that passes this, purely for
-    internal AI-generation telemetry). Never required, never changes this
-    function's return value or behavior otherwise.
-
-    Returns a list of dicts, each with:
-        - question (str)
-        - options (list[str])       — exactly 4 choices
-        - correct_answer (str)      — must be one of the options exactly
-        - explanation (str)         — brief explanation for the correct answer
-        - lesson (str)              — the specific lesson/topic this question covers
-
-    Raises:
-        HTTPException(502) if the Groq API fails or returns malformed JSON.
-    """
+    # Asks Groq for `question_count` MCQs and hands back a validated list of
+    # dicts (question/options/correct_answer/explanation/lesson). If `lesson`
+    # is omitted, each question gets its own randomly varied lesson instead
+    # of the whole quiz being pinned to one topic. `existing_questions` are
+    # passed to the model so it knows what not to repeat; `avoid_lessons`
+    # nudges it toward topic variety across separate quiz generations, not
+    # just within one quiz. Raises HTTPException(502) on any Groq/parsing failure.
     existing_questions = existing_questions or []
     avoid_lessons = avoid_lessons or []
     random_lessons = lesson is None
 
-    # ── System prompt: define the strict JSON contract ────────────────────────
     system_prompt = """You are an expert educational content creator for Sri Lankan school students.
 Your task is to generate UNIQUE, DIVERSE multiple-choice quiz questions.
 
@@ -179,8 +117,6 @@ QUALITY RULES:
 - Do NOT output anything outside the JSON object.
 """
 
-    # ── User prompt: the actual quiz request ──────────────────────────────────
-    # Include a timestamp seed so the LLM does not produce cached/repetitive output
     seed_context = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
     exclusion_block = ""
@@ -254,7 +190,6 @@ QUALITY RULES:
             detail=f"AI service error: {exc}",
         )
 
-    # ── Parse and validate the response ───────────────────────────────────────
     raw_content = response.choices[0].message.content or ""
 
     try:
@@ -273,7 +208,6 @@ QUALITY RULES:
             detail="AI returned an empty question list. Please try again.",
         )
 
-    # ── Sanitise each question ────────────────────────────────────────────────
     validated: list[dict] = []
     for i, q in enumerate(raw_questions[:question_count]):
         if not isinstance(q, dict):
@@ -283,21 +217,33 @@ QUALITY RULES:
         options = q.get("options", [])
         correct = str(q.get("correct_answer", "")).strip()
         explanation = str(q.get("explanation", "")).strip()
-        # Fixed-lesson mode always uses the given lesson verbatim, regardless
-        # of what the model echoed back. Random mode uses the model's choice,
-        # falling back to the subject name if it returned something empty.
         q_lesson = lesson if lesson else (str(q.get("lesson", "")).strip() or subject)
 
-        # Skip malformed entries
-        if not question_text or not isinstance(options, list) or len(options) < 2:
-            logger.warning("Skipping malformed question at index %d", i)
+        # Must have exactly 4 options (Groq occasionally ignores that rule
+        # and returns 5+). Truncating to 4 risks losing the actual correct
+        # answer, so a bad-count question is dropped entirely rather than
+        # patched up — the caller's retry loop tops up the shortfall.
+        if not question_text or not isinstance(options, list) or len(options) != 4:
+            logger.warning(
+                "Skipping malformed question at index %d: expected 4 options, got %d",
+                i, len(options) if isinstance(options, list) else 0,
+            )
             continue
 
-        # Ensure correct_answer is in options (case-insensitive fallback)
+        # correct_answer has to actually match one of the options (exact, or
+        # case/whitespace-insensitive). If it matches neither, there's no way
+        # to know which option is really correct — dropping it beats the old
+        # behavior of defaulting to options[0] and mislabeling a wrong answer
+        # as correct.
         if correct not in options:
-            # Try case-insensitive match
-            match = next((o for o in options if o.strip().lower() == correct.lower()), None)
-            correct = match if match else options[0]
+            match = next((o for o in options if o.strip().lower() == correct.strip().lower()), None)
+            if match is None:
+                logger.warning(
+                    "Skipping question at index %d: correct_answer %r not found in options %r",
+                    i, correct, options,
+                )
+                continue
+            correct = match
 
         validated.append({
             "question": question_text,
@@ -321,46 +267,13 @@ QUALITY RULES:
     return validated
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. PERSONALISED FEEDBACK GENERATION
-# ─────────────────────────────────────────────────────────────────────────────
-
 async def generate_feedback(analytics_summary: dict) -> dict:
-    """
-    Takes the user's analytics data and asks Groq to produce personalised
-    improvement suggestions.
-
-    `analytics_summary` shape:
-        {
-            "overall_accuracy": 65.0,
-            "overall_avg_response_time": 18.5,
-            "subjects": [
-                {"subject": "Maths", "accuracy": 45.0, "weak_topic": "Algebra"},
-                {"subject": "Science", "accuracy": 85.0, "weak_topic": None},
-            ],
-            "recommendations": [
-                {
-                    "priority": 1, "type": "weak_topic", "subject": "Maths",
-                    "topic": "Algebra", "reason": "Accuracy is 30% across 10 attempts",
-                    "recommended_action": "Complete an easy practice quiz on Algebra",
-                    "recommended_difficulty": "easy",
-                    "supporting_metrics": {"accuracy": 30.0, "attempts": 10, ...},
-                },
-                ...
-            ],
-        }
-
-    `recommendations` (see app/services/recommendation_service.py) is
-    deterministic and database-driven — computed with NO AI involvement.
-    When present, the prompt below explicitly tells Groq to treat it as
-    ground truth and build suggestions FROM it rather than inventing its own
-    analysis, so the AI-written suggestions stay consistent with the numbers
-    already shown elsewhere in the app; when it's empty (insufficient data),
-    Groq falls back to general, non-numeric encouragement instead.
-
-    Returns a dict with keys:
-        weak_areas, strong_areas, suggestions, motivational_note
-    """
+    # Turns the user's analytics into a short, personalised pep talk from
+    # Groq. `analytics_summary["recommendations"]` is deterministic and
+    # database-driven (see recommendation_service.py, no AI involved) — the
+    # prompt tells Groq to treat it as ground truth and build suggestions
+    # from it rather than inventing its own analysis, so the AI's wording
+    # stays consistent with the numbers shown elsewhere in the app.
     system_prompt = """You are a knowledgeable and encouraging study coach for school students.
 Analyse the student's quiz performance data and provide personalised feedback.
 
@@ -426,11 +339,9 @@ Keep suggestions practical and achievable for a school student.
     try:
         feedback = json.loads(raw_content)
     except json.JSONDecodeError:
-        # Return a graceful fallback instead of crashing
         logger.warning("Groq feedback returned non-JSON, using fallback.")
         feedback = {}
 
-    # Ensure all expected keys exist with safe defaults
     return {
         "weak_areas": feedback.get("weak_areas", []),
         "strong_areas": feedback.get("strong_areas", []),

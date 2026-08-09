@@ -1,12 +1,3 @@
-"""
-services/analytics/timing.py
-────────────────────────────────
-Lightweight phase-timing instrumentation for GET /analytics/me, active only
-in development — see orchestrator.py, which wraps its query phase and each
-of the 8 service phases in this context manager. Never adds overhead in
-production (the timer isn't even started when disabled), and never raises —
-a timing bug must not be able to break the actual analytics response.
-"""
 import logging
 import time
 from contextlib import contextmanager
@@ -18,6 +9,9 @@ logger = logging.getLogger(__name__)
 
 @contextmanager
 def timed_phase(name: str):
+    # Logs how long a phase of GET /analytics/me took, dev-only — the timer
+    # doesn't even start in production, and this must never raise, since a
+    # timing bug should never be able to break the actual response.
     if settings.ENVIRONMENT != "development":
         yield
         return

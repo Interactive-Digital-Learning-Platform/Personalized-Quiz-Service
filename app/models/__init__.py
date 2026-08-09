@@ -1,12 +1,5 @@
-"""
-models/__init__.py
-──────────────────
-Import all models here so SQLAlchemy's metadata knows about them when
-`Base.metadata.create_all()` is called at startup.
-
-This is the single import point — any new model added to the project must also
-be imported here.
-"""
+# Every model needs to be imported here, or SQLAlchemy won't know it exists
+# when create_all() runs at startup — add new models to this list too.
 from app.models.user import User  # noqa: F401
 from app.models.question import Question  # noqa: F401
 from app.models.quiz_session import QuizSession, QuestionAttempt  # noqa: F401

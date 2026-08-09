@@ -1,18 +1,3 @@
-"""
-services/telemetry_service.py
-────────────────────────────────
-Internal, technical telemetry for the Groq quiz-generation pipeline —
-completely separate from the user-facing learning analytics in
-analytics_service.py. One AIGenerationEvent row is recorded per
-POST /quiz/generate request (see quiz_service.generate_quiz()), regardless
-of whether generation succeeded, failed, or fell back to the DB cache.
-Read back via the admin-only GET /analytics/system/ai-generation endpoint —
-never exposed through GET /analytics/me.
-
-Never stores API keys, JWTs, prompts, model responses, or raw exception
-messages — only the safe, fixed-vocabulary `error_category` (see
-ERROR_CATEGORIES) and plain counts/timings.
-"""
 import logging
 
 from fastapi import HTTPException
@@ -30,12 +15,9 @@ ERROR_CATEGORIES = (
 
 
 def categorize_generation_error(exc: BaseException) -> str:
-    """
-    Maps an exception raised during AI quiz generation to one of
-    ERROR_CATEGORIES. This is the ONLY thing derived from the exception that
-    ever reaches the database — the exception's own message/detail is used
-    here transiently to classify it, then discarded.
-    """
+    # Only this coarse category ever reaches the DB — the exception's actual
+    # message is used here to classify it, then thrown away, so telemetry
+    # rows never end up holding anything sensitive.
     if isinstance(exc, SQLAlchemyError):
         return "database_error"
 
@@ -72,12 +54,9 @@ async def record_generation_event(
     latency_ms: float,
     error_category: str | None,
 ) -> None:
-    """
-    Best-effort telemetry write — deliberately swallows every exception.
-    A failure recording telemetry must NEVER break quiz generation itself
-    (see quiz_service.generate_quiz(), which calls this from a `finally`
-    block after the real response or exception has already been decided).
-    """
+    # Best-effort write, called from a `finally` block in quiz_service.
+    # generate_quiz() — a telemetry failure must never break quiz generation
+    # itself, so every exception here is deliberately swallowed.
     try:
         event = AIGenerationEvent(
             user_id=user_id,
@@ -97,7 +76,7 @@ async def record_generation_event(
         )
         db.add(event)
         await db.commit()
-    except Exception as exc:  # noqa: BLE001 — deliberately broad, see docstring
+    except Exception as exc:  # noqa: BLE001 — deliberately broad, see comment above
         logger.error("Failed to record AI generation telemetry (non-critical): %s", exc)
         try:
             await db.rollback()
@@ -111,21 +90,8 @@ async def get_ai_generation_analytics(
     start_date=None,
     end_date=None,
 ) -> dict:
-    """
-    Aggregate AI-generation telemetry across ALL users — this is a
-    system-wide, admin-only view (see routes/analytics.py's
-    GET /analytics/system/ai-generation), never scoped to one user like
-    GET /analytics/me is.
-
-    p95_generation_latency_ms uses PostgreSQL's percentile_cont() directly
-    against Postgres. SQLite (used by this project's test suite) has no
-    equivalent built-in function, so the identical statistic — linear-
-    interpolation continuous percentile, matching percentile_cont's own
-    definition — is computed in Python from the same filtered latency
-    values when running on SQLite, keeping the two paths numerically
-    consistent even though only one of them is the literal SQL feature
-    requested.
-    """
+    # System-wide, admin-only aggregate across ALL users (unlike
+    # GET /analytics/me, which is always scoped to one user).
     filters = []
     if start_date is not None:
         filters.append(AIGenerationEvent.created_at >= start_date)
@@ -144,10 +110,6 @@ async def get_ai_generation_analytics(
     ).where(*filters)
     row = (await db.execute(agg_stmt)).one()
 
-    # Postgres can return SUM()/CASE-derived aggregates as decimal.Decimal
-    # rather than plain int (see analytics_service.py's Decimal notes for
-    # the same recurring issue) — explicitly convert rather than relying on
-    # `or 0` alone, which only masks the type when the result happens to be zero.
     total_requests = int(row.total_requests or 0)
     successful = int(row.successful or 0)
     cache_fallback = int(row.cache_fallback or 0)
@@ -162,6 +124,10 @@ async def get_ai_generation_analytics(
         p95_value = (await db.execute(p95_stmt)).scalar_one()
         p95 = round(float(p95_value or 0.0), 2)
     else:
+        # SQLite (the test DB) has no percentile_cont, so fall back to a pure
+        # Python implementation of the same statistic below — keeps both
+        # paths numerically consistent even though only Postgres gets the
+        # literal SQL feature.
         latencies_stmt = (
             select(AIGenerationEvent.latency_ms)
             .where(*filters)
@@ -191,11 +157,8 @@ async def get_ai_generation_analytics(
 
 
 def _percentile_cont(sorted_values: list[float], pct: float) -> float:
-    """
-    Pure-Python re-implementation of PostgreSQL's percentile_cont — linear
-    interpolation between the two closest ranks — used only as the SQLite
-    fallback above so both code paths compute the exact same statistic.
-    """
+    # Linear interpolation between the two closest ranks — same definition
+    # Postgres's percentile_cont uses, reimplemented here for SQLite.
     if not sorted_values:
         return 0.0
     if len(sorted_values) == 1:

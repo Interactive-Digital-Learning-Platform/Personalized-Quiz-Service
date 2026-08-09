@@ -1,35 +1,13 @@
-"""
-services/analytics/summary_service.py
-────────────────────────────────────────
-AnalyticsSummaryService — the OVERALL (non-subject-scoped) summary fields
-for GET /analytics/me: weighted accuracy, response-time statistics and
-answering behavior, and session-completion figures.
-
-Also hosts two small pure functions shared by SubjectAnalyticsService and
-TopicAnalyticsService — response-time stats and answering-behavior
-classification are the same formula at every scope (overall/subject/topic),
-just narrowed to that scope's own rows, so the formula lives here ONCE
-rather than being reimplemented per scope.
-"""
 from app.core.config import settings
 from app.services.analytics.types import GradedTotals, ResponseTimeRow, SessionCompletionStats
 from app.services.scoring_service import classify_answering_behavior, compute_median_and_stddev
 
 
 def compute_response_time_stats(entries: list[ResponseTimeRow]) -> dict:
-    """
-    avg/median/fastest(min)/slowest(max)/stddev response time, plus a
-    correct-vs-incorrect breakdown, computed from whatever scope's list of
-    ResponseTimeRow is passed in — overall/subject/topic all call this the
-    same way, just with a differently-filtered `entries` list.
-
-    median/stddev are computed here in Python (via scoring_service.
-    compute_median_and_stddev) rather than SQL because they can't be
-    correctly recombined from grouped sub-aggregates (a median of a union
-    isn't derivable from its parts' medians), and because SQLite — this
-    project's test database — has no percentile_cont/stddev_samp
-    equivalent at all.
-    """
+    # avg/median/fastest/slowest/stddev plus correct-vs-incorrect breakdown —
+    # shared by the overall/subject/topic scopes, each just passing in a
+    # differently-filtered `entries` list. median/stddev run in Python
+    # (compute_median_and_stddev) since SQLite has no equivalent SQL function.
     values = [e.response_time for e in entries]
     correct_values = [e.response_time for e in entries if e.correct]
     incorrect_values = [e.response_time for e in entries if not e.correct]
@@ -51,14 +29,6 @@ def compute_response_time_stats(entries: list[ResponseTimeRow]) -> dict:
 
 
 def compute_answering_behavior(rt_stats: dict, accuracy: float, overall_median_response_time: float) -> str:
-    """
-    Thin wrapper around scoring_service.classify_answering_behavior() that
-    reads its threshold/weight configuration from settings once here, so
-    every call site (overall/subject/topic) stays consistent by construction.
-    "fast" is always relative to the user's OVERALL median response time,
-    never a subject's or topic's own — see classify_answering_behavior()'s
-    own docstring for why.
-    """
     return classify_answering_behavior(
         avg_response_time=rt_stats["avg_response_time"],
         accuracy=accuracy,
@@ -71,25 +41,13 @@ def compute_answering_behavior(rt_stats: dict, accuracy: float, overall_median_r
 
 
 class AnalyticsSummaryService:
-    """
-    Builds the overall summary section of GET /analytics/me.
-
-    ── Session-completion classification ───────────────────────────────────
-    Every QuizSession falls into exactly one of two DISJOINT buckets
-    (always summing to total_sessions): completed (a QuizCompletion row
-    exists) or incomplete (it doesn't). Two further categories OVERLAP those
-    buckets rather than adding new ones: timed_out is a SUBSET of completed
-    (a quiz that hit the timer still counts as completed, but is also
-    flagged); abandoned is a SUBSET of incomplete (inactive longer than
-    ANALYTICS_ABANDONED_AFTER_HOURS). Deleted sessions are never counted —
-    QuizSession rows are hard-deleted, so there's no soft-delete flag to filter.
-
-    ── Weighted accuracy ────────────────────────────────────────────────────
-    overall_accuracy is total_correct_answers / total_questions_attempted
-    across every graded attempt — deliberately NOT an average of each
-    subject's own accuracy, which would weight a subject with 2 attempts
-    the same as one with 200.
-    """
+    # Builds the overall (non-subject-scoped) summary section. Every session
+    # is either completed or incomplete (always summing to total_sessions);
+    # timed_out is a subset of completed, abandoned a subset of incomplete —
+    # they overlap those two buckets rather than adding new ones.
+    # overall_accuracy is total_correct/total_attempted across every graded
+    # attempt, not an average of each subject's own accuracy — that would
+    # weight a 2-attempt subject the same as a 200-attempt one.
 
     def __init__(
         self,
@@ -100,9 +58,7 @@ class AnalyticsSummaryService:
         self._session_stats = session_stats
         self._graded_totals = graded_totals
         self.response_time_stats = compute_response_time_stats(overall_response_time_rows)
-        # Shared reference every subject/topic scope compares its OWN pace
-        # against — see compute_answering_behavior()'s docstring. Falls back
-        # to a configured constant when there's no valid response time yet.
+        # What every subject/topic scope compares its own pace against.
         self.overall_median_response_time = (
             self.response_time_stats["median_response_time"]
             if self.response_time_stats["count"] > 0

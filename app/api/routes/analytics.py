@@ -1,12 +1,3 @@
-"""
-api/routes/analytics.py
-────────────────────────
-Analytics-related API endpoints:
-
-    GET /analytics/me                     — User's full performance profile
-    GET /analytics/feedback               — AI-generated personalised improvement suggestions
-    GET /analytics/system/ai-generation   — Internal, admin-only Groq generation telemetry
-"""
 import logging
 from datetime import datetime, timezone
 
@@ -26,10 +17,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# GET /analytics/me
-# ─────────────────────────────────────────────────────────────────────────────
-
 @router.get(
     "/me",
     response_model=UserAnalyticsResponse,
@@ -47,10 +34,6 @@ async def get_my_analytics(
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> UserAnalyticsResponse:
-    """
-    Fetches aggregated data from the `analytics` table for the current user.
-    No AI call is made here — this is pure DB data, so it's fast.
-    """
     clerk_id: str = current_user.get("sub", "")
     if not clerk_id:
         raise HTTPException(
@@ -64,10 +47,6 @@ async def get_my_analytics(
 
     return UserAnalyticsResponse(**analytics_data)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# GET/POST /analytics/feedback
-# ─────────────────────────────────────────────────────────────────────────────
 
 @router.get(
     "/feedback",
@@ -94,13 +73,6 @@ async def get_ai_feedback(
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> AIFeedbackResponse:
-    """
-    Flow:
-    1. Fetch the user's analytics from DB.
-    2. If no data yet, return a friendly first-time message.
-    3. Build a structured summary dict for the Groq prompt.
-    4. Call groq_service.generate_feedback() and return the response.
-    """
     clerk_id: str = current_user.get("sub", "")
     if not clerk_id:
         raise HTTPException(
@@ -110,10 +82,8 @@ async def get_ai_feedback(
 
     logger.info("GET /analytics/feedback — clerk_id=%s", clerk_id)
 
-    # ── Fetch user's analytics ────────────────────────────────────────────────
     analytics_data = await get_user_analytics(db=db, clerk_id=clerk_id)
 
-    # ── Handle first-time users with no quiz history ──────────────────────────
     if analytics_data["total_sessions"] == 0:
         return AIFeedbackResponse(
             weak_areas=[],
@@ -129,16 +99,11 @@ async def get_ai_feedback(
             generated_at=datetime.now(timezone.utc),
         )
 
-    # ── Build the summary for the Groq prompt ─────────────────────────────────
-    # Deliberately a LEAN per-subject summary, not analytics_data["subjects"]
-    # wholesale — each subject entry there now carries its full topic
-    # breakdown (mastery components, difficulty performance, response-time
-    # stats, repeated-question stats, etc., accumulated across many analytics
-    # features), which is far more than a feedback prompt needs and was
-    # large enough in practice to exceed Groq's tokens-per-minute limit on
-    # accounts with several subjects/topics. The detailed, already-actionable
-    # data lives in `recommendations` instead — grounded in the same numbers,
-    # just pre-summarized.
+    # Trimmed down on purpose — the full subjects[] payload carries every
+    # topic's mastery/difficulty/response-time breakdown, which got big
+    # enough on multi-subject accounts to blow past Groq's tokens-per-minute
+    # limit. `recommendations` below already has the detailed, actionable
+    # stuff, so the AI doesn't need the raw data too.
     lean_subjects = [
         {
             "subject": s["subject"],
@@ -149,10 +114,6 @@ async def get_ai_feedback(
         }
         for s in analytics_data["subjects"]
     ]
-    # `recommendations` is deterministic and database-driven (see
-    # recommendation_service.py, computed inside get_user_analytics() above —
-    # no extra call needed here) — passed through so Groq grounds its
-    # suggestions in it instead of inventing its own analysis from scratch.
     analytics_summary = {
         "overall_accuracy": analytics_data["overall_accuracy"],
         "overall_avg_response_time": analytics_data["overall_avg_response_time"],
@@ -163,7 +124,6 @@ async def get_ai_feedback(
         "recommendations": analytics_data["recommendations"],
     }
 
-    # ── Call Groq for AI feedback ──────────────────────────────────────────────
     feedback_data = await generate_feedback(analytics_summary)
 
     return AIFeedbackResponse(
@@ -174,10 +134,6 @@ async def get_ai_feedback(
         generated_at=datetime.now(timezone.utc),
     )
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# GET /analytics/system/ai-generation — INTERNAL, admin-only
-# ─────────────────────────────────────────────────────────────────────────────
 
 @router.get(
     "/system/ai-generation",

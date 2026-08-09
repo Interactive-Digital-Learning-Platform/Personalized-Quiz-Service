@@ -1,16 +1,3 @@
-"""
-services/analytics/growth_service.py
-────────────────────────────────────────
-GrowthAnalyticsService — orchestrates app.services.growth_service's pure
-formula (build_growth_analytics et al., imported below as
-`growth_formulas`) for the `growth` section of GET /analytics/me.
-
-Effort/consistency are scoped to a rolling window (its own raw queries —
-see queries.fetch_growth_session_rows()/fetch_growth_attempt_rows());
-improvement and the overall mastery_score input deliberately REUSE data
-already computed by TrendAnalyticsService/RepeatedMistakeAnalyticsService/
-SubjectAnalyticsService rather than recomputing anything from scratch.
-"""
 from datetime import datetime, timedelta, timezone
 
 from app.core.config import settings
@@ -20,6 +7,12 @@ from app.services.analytics.types import GrowthAttemptRow, GrowthSessionRow
 
 
 class GrowthAnalyticsService:
+    # Gathers the inputs app.services.growth_service's pure formula needs for
+    # the `growth` section. Effort/consistency come from their own rolling-
+    # window queries; improvement and the overall mastery input reuse data
+    # TrendAnalyticsService/RepeatedMistakeAnalyticsService/
+    # SubjectAnalyticsService already computed, rather than recomputing anything.
+
     def __init__(
         self,
         *,
@@ -42,9 +35,8 @@ class GrowthAnalyticsService:
         completed_quiz_count = sum(1 for row in self._growth_session_rows if row.completion_id is not None)
         completion_rate = growth_formulas.compute_rate_score(completed_quiz_count, total_sessions_in_window)
 
-        # Reuses the exact same "incomplete + inactive longer than the
-        # threshold" definition as the all-time abandoned_sessions figure in
-        # AnalyticsSummaryService, just scoped to the growth window.
+        # Same "incomplete + inactive longer than the threshold" definition
+        # as the all-time abandoned_sessions figure, just scoped to this window.
         abandoned_cutoff = datetime.now(timezone.utc) - timedelta(hours=settings.ANALYTICS_ABANDONED_AFTER_HOURS)
         abandoned_in_window = sum(
             1
@@ -97,10 +89,9 @@ class GrowthAnalyticsService:
             self._overall_repeated["mistake_correction_rate"] if repeated_denominator > 0 else None
         )
 
-        # Overall mastery: the average of subjects[].mastery_score across
-        # subjects with enough data to have one — NOT a gate on growth
-        # itself, since growth describes recent trajectory and shouldn't
-        # require established per-subject mastery history.
+        # Overall mastery = average of subjects[].mastery_score across
+        # subjects with enough data to have one. This doesn't gate growth
+        # itself — growth describes recent trajectory, not established mastery.
         subject_mastery_scores = [s["mastery_score"] for s in self._subjects_data if s["mastery_score"] is not None]
         mastery_score = (
             round(sum(subject_mastery_scores) / len(subject_mastery_scores), 2)

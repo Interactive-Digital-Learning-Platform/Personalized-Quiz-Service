@@ -118,6 +118,131 @@ async def test_non_transient_error_is_not_retried():
     mock_sleep.assert_not_called()
 
 
+def _fake_chat_completion(questions: list[dict]):
+    """A minimal stand-in for Groq's ChatCompletion response shape — only
+    the `.choices[0].message.content` chain that generate_questions() reads."""
+    import json
+    from types import SimpleNamespace
+
+    content = json.dumps({"questions": questions})
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+
+
+@pytest.mark.asyncio
+async def test_generate_questions_drops_question_whose_correct_answer_matches_no_option():
+    """A question where correct_answer doesn't match ANY option (not even
+    case-insensitively) must be dropped, not kept with an arbitrary option
+    (e.g. options[0]) silently mislabelled as correct — that used to produce
+    quizzes where none of the 4 choices was actually right."""
+    questions = [
+        {
+            "question": "What is 2 + 2?",
+            "options": ["3", "4", "5", "6"],
+            "correct_answer": "4",
+            "explanation": "Basic addition.",
+            "lesson": "Arithmetic",
+        },
+        {
+            "question": "What is the capital of France?",
+            "options": ["Berlin", "Madrid", "Rome", "Lisbon"],
+            "correct_answer": "Paris",  # not in options at all
+            "explanation": "Paris is the capital of France.",
+            "lesson": "Geography",
+        },
+    ]
+    mock_create = AsyncMock(return_value=_fake_chat_completion(questions))
+    telemetry: dict = {}
+
+    with patch.object(groq_service._groq_client.chat.completions, "create", mock_create):
+        result = await groq_service.generate_questions(
+            grade=10, subject="Mathematics", difficulty="easy", question_count=2,
+            telemetry=telemetry,
+        )
+
+    assert len(result) == 1
+    assert result[0]["question"] == "What is 2 + 2?"
+    assert result[0]["correct_answer"] == "4"
+    assert telemetry["invalid_question_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_generate_questions_drops_question_with_wrong_option_count():
+    """A question must have EXACTLY 4 options. Groq sometimes returns more
+    (e.g. its raw JSON leaks trailing key/value fragments into the options
+    array) or fewer — either way the question is dropped rather than
+    truncated/padded, since silently trimming risks losing the actual
+    correct_answer or leaving incomplete distractors."""
+    questions = [
+        {
+            "question": "What is 2 + 2?",
+            "options": ["3", "4", "5", "6"],
+            "correct_answer": "4",
+            "explanation": "Basic addition.",
+            "lesson": "Arithmetic",
+        },
+        {
+            "question": "Compare and contrast acute and obtuse angles.",
+            "options": [
+                "Acute < 90 degrees, Obtuse > 90 degrees.",
+                "Acute > 90 degrees, Obtuse < 90 degrees.",
+                "They are the same.",
+                "Neither has a defined range.",
+                "correct_answer",
+                ":",
+                "Acute < 90 degrees, Obtuse > 90 degrees.",
+            ],
+            "correct_answer": "Acute < 90 degrees, Obtuse > 90 degrees.",
+            "explanation": "Definitions.",
+            "lesson": "Angles",
+        },
+        {
+            "question": "Only two options?",
+            "options": ["Yes", "No"],
+            "correct_answer": "Yes",
+            "explanation": "N/A",
+            "lesson": "Misc",
+        },
+    ]
+    mock_create = AsyncMock(return_value=_fake_chat_completion(questions))
+    telemetry: dict = {}
+
+    with patch.object(groq_service._groq_client.chat.completions, "create", mock_create):
+        result = await groq_service.generate_questions(
+            grade=10, subject="Mathematics", difficulty="easy", question_count=3,
+            telemetry=telemetry,
+        )
+
+    assert len(result) == 1
+    assert result[0]["question"] == "What is 2 + 2?"
+    assert len(result[0]["options"]) == 4
+    assert telemetry["invalid_question_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_generate_questions_normalizes_whitespace_and_case_correct_answer():
+    """A correct_answer that differs from its option only by case/whitespace
+    should still be accepted (and normalized to the option's exact text) —
+    only a genuine mismatch should cause a drop."""
+    questions = [
+        {
+            "question": "What is 2 + 2?",
+            "options": ["3", "Four", "5", "6"],
+            "correct_answer": "  FOUR  ",
+            "explanation": "Basic addition.",
+            "lesson": "Arithmetic",
+        },
+    ]
+    mock_create = AsyncMock(return_value=_fake_chat_completion(questions))
+
+    with patch.object(groq_service._groq_client.chat.completions, "create", mock_create):
+        result = await groq_service.generate_questions(
+            grade=10, subject="Mathematics", difficulty="easy", question_count=1,
+        )
+
+    assert len(result) == 1
+    assert result[0]["correct_answer"] == "Four"
+
+
 @pytest.mark.asyncio
 async def test_generate_questions_surfaces_502_after_retries_exhausted():
     """End-to-end: generate_questions() itself should still raise a clean
