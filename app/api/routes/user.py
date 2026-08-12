@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.security import get_current_user
-from app.schemas.user import UserOut
+from app.schemas.user import UserOut, UserSyncRequest
 from app.services.quiz_service import get_or_create_user
 
 logger = logging.getLogger(__name__)
@@ -53,11 +53,23 @@ async def get_my_profile(
     ),
 )
 async def sync_user(
+    payload: UserSyncRequest | None = None,
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> UserOut:
     clerk_id: str = current_user.get("sub", "")
     user = await get_or_create_user(db=db, clerk_id=clerk_id)
+
+    username = (
+        (payload.username if payload else None)
+        or current_user.get("username")
+        or current_user.get("name")
+    )
+    if username and user.username != username:
+        user.username = username
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
 
     logger.info("POST /user/sync — clerk_id=%s, user_id=%d", clerk_id, user.id)
     return UserOut.model_validate(user)
