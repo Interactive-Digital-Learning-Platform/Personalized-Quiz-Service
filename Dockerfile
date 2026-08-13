@@ -2,10 +2,16 @@
 # Use official slim Python 3.12 image to keep the image lightweight
 FROM python:3.12-slim
 
+# Pull the uv binary from Astral's distroless image rather than installing it
+# via pip — keeps it out of the final dependency graph entirely.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
 # Set environment variables to prevent Python from writing .pyc files
 # and to ensure stdout/stderr is unbuffered (important for Docker logging)
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
 
 # Create a non-root user for security
 RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
@@ -14,11 +20,11 @@ RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
 WORKDIR /app
 
 # ── Install Dependencies ───────────────────────────────────────────────────────
-# Copy only requirements first to leverage Docker layer caching.
-# If requirements.txt hasn't changed, this layer won't be rebuilt.
-COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+# Copy only the lockfile + project metadata first to leverage Docker layer
+# caching — this layer only rebuilds when dependencies actually change.
+# --no-dev skips pytest/pytest-asyncio, which the runtime image doesn't need.
+COPY pyproject.toml uv.lock .
+RUN uv sync --frozen --no-dev
 
 # ── Copy Application Code ──────────────────────────────────────────────────────
 COPY . .
@@ -28,6 +34,9 @@ RUN chown -R appuser:appgroup /app
 
 # Switch to non-root user
 USER appuser
+
+# Put the venv uv created ahead of the system Python on PATH
+ENV PATH="/app/.venv/bin:$PATH"
 
 # ── Runtime ────────────────────────────────────────────────────────────────────
 # Expose the port that uvicorn will listen on
