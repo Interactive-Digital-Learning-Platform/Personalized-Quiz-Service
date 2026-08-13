@@ -61,6 +61,8 @@ async def generate_questions(
     lesson: str | None = None,
     existing_questions: list[str] | None = None,
     avoid_lessons: list[str] | None = None,
+    preferred_lessons: list[str] | None = None,
+    adaptive_context: str | None = None,
     telemetry: dict | None = None,
 ) -> list[dict]:
     # Asks Groq for `question_count` MCQs and hands back a validated list of
@@ -69,7 +71,18 @@ async def generate_questions(
     # of the whole quiz being pinned to one topic. `existing_questions` are
     # passed to the model so it knows what not to repeat; `avoid_lessons`
     # nudges it toward topic variety across separate quiz generations, not
-    # just within one quiz. Raises HTTPException(502) on any Groq/parsing failure.
+    # just within one quiz.
+    #
+    # `preferred_lessons` and `adaptive_context` are optional, additive hints
+    # from the adaptive-mastery engine (weak lessons to weight coverage
+    # toward, and a short plain-language note about the student's current
+    # standing) — both default to None and change nothing about the prompt
+    # when omitted, so every existing caller (and the lesson-pinned branch,
+    # which never receives them) behaves exactly as before. Only ever a
+    # short natural-language hint — never raw DB rows/ids/scores, per the
+    # "don't expose unnecessary internal DB details to the LLM" requirement.
+    #
+    # Raises HTTPException(502) on any Groq/parsing failure.
     existing_questions = existing_questions or []
     avoid_lessons = avoid_lessons or []
     random_lessons = lesson is None
@@ -136,13 +149,26 @@ QUALITY RULES:
                 f"prefer OTHER lessons where possible for variety:\n{avoid_lines}\n"
             )
 
+        preferred_lessons_block = ""
+        if preferred_lessons:
+            preferred_lines = "\n".join(f"- {l}" for l in preferred_lessons[:10])
+            preferred_lessons_block = (
+                f"\n\nThis student would benefit from extra practice in these lessons — "
+                f"include AT LEAST ONE question from each if possible, without making every "
+                f"question come from only these:\n{preferred_lines}\n"
+            )
+
+        adaptive_context_block = f"\n\nStudent context: {adaptive_context}\n" if adaptive_context else ""
+
         user_prompt = (
             f"[Request ID: {seed_context}]\n\n"
             f"Generate {question_count} UNIQUE {difficulty}-difficulty multiple-choice questions "
             f"for Grade {grade} Sri Lankan students.\n"
             f"Subject: {subject}\n"
             f"{exclusion_block}"
-            f"{avoid_lessons_block}\n"
+            f"{avoid_lessons_block}"
+            f"{preferred_lessons_block}"
+            f"{adaptive_context_block}\n"
             f"Requirements:\n"
             f"- Do NOT focus on a single lesson. EACH question must come from a DIFFERENT, "
             f"randomly chosen lesson/topic within the full '{subject}' syllabus for this grade.\n"
@@ -155,13 +181,15 @@ QUALITY RULES:
             f"Return exactly {question_count} questions in the required JSON format."
         )
     else:
+        adaptive_context_block = f"\n\nStudent context: {adaptive_context}\n" if adaptive_context else ""
         user_prompt = (
             f"[Request ID: {seed_context}]\n\n"
             f"Generate {question_count} UNIQUE {difficulty}-difficulty multiple-choice questions "
             f"for Grade {grade} Sri Lankan students.\n"
             f"Subject: {subject}\n"
             f"Lesson / Topic: {lesson}\n"
-            f"{exclusion_block}\n"
+            f"{exclusion_block}"
+            f"{adaptive_context_block}\n"
             f"Requirements:\n"
             f"- Cover {question_count} DIFFERENT aspects or sub-concepts within '{lesson}'.\n"
             f"- Set every question's \"lesson\" field to exactly \"{lesson}\".\n"

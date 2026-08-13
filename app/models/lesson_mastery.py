@@ -27,6 +27,23 @@ class LessonMastery(Base):
     consecutive_strong: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     consecutive_weak: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
+    # Continuous Evidence-Weighted Mastery System — see
+    # app/services/difficulty_mastery_engine.py for the formulas that
+    # produce these. Safe defaults below match a brand-new student
+    # (neutral mastery, zero confidence, no evidence yet).
+    mastery_score: Mapped[float] = mapped_column(Float, nullable=False, default=50.0)
+    fluency_score: Mapped[float] = mapped_column(Float, nullable=False, default=50.0)
+    confidence_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    evidence_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    recent_accuracy: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    previous_accuracy: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    trend_score: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    trend_label: Mapped[str] = mapped_column(String(32), nullable=False, default="insufficient_data")
+    retention_score: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    last_mastery_update: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

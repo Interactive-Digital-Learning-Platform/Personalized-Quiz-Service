@@ -20,6 +20,25 @@ class MasteryComponents(BaseModel):
     consistency_score: float
 
 
+class AdaptiveMasteryDetail(BaseModel):
+    # Output of the Continuous Evidence-Weighted Mastery System
+    # (SubjectMastery / app/services/difficulty_mastery_engine.py) — the
+    # actual driver of difficulty selection. Distinct from
+    # mastery_score/mastery_level/mastery_components above, which are a
+    # separate, analytics-only display metric (app/services/mastery_service.py)
+    # that never affects difficulty.
+    mastery_score: float
+    fluency_score: float
+    confidence_score: float
+    evidence_count: int
+    recent_accuracy: float | None
+    previous_accuracy: float | None
+    trend_score: float | None
+    trend_label: str
+    retention_score: float | None
+    last_mastery_update: datetime | None
+
+
 class RepeatedQuestionAnalytics(BaseModel):
     # "Repeated" means the same underlying question (by fingerprint) shown
     # again — questions only ever seen once aren't counted here at all.
@@ -92,12 +111,14 @@ class SubjectAnalytics(BaseModel):
     demotion_threshold: float
     quizzes_required_for_promotion: int
     promotion_progress_percentage: float
+    promotion_readiness: float
     next_difficulty: str
     difficulty_status_message: str
 
     mastery_score: float | None
     mastery_level: str
     mastery_components: MasteryComponents | None
+    adaptive_mastery: AdaptiveMasteryDetail | None
 
 
 class EffortComponents(BaseModel):
