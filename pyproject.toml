@@ -1,0 +1,39 @@
+[project]
+name = "personalized-quiz-service"
+version = "0.5.0"
+description = "AI-powered Personalised Quiz Service backend — generates adaptive quizzes using Groq LLaMA 3, provides per-subject analytics, and delivers AI study coaching."
+requires-python = ">=3.12"
+dependencies = [
+    # ── Web Framework ──────────────────────────────────────────────────────
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.29.0",   # ASGI server with websocket & HTTP/2 support
+
+    # ── Database ───────────────────────────────────────────────────────────
+    "sqlalchemy>=2.0.0",           # Async ORM (2.x API)
+    "asyncpg>=0.29.0",             # Async PostgreSQL driver (used by SQLAlchemy)
+    "aiosqlite>=0.20.0",           # Async SQLite driver for local development fallback
+    "greenlet>=3.0.0",             # Required by SQLAlchemy's async engine bridge
+    "alembic>=1.13.0",             # Schema migrations (see alembic/versions/)
+
+    # ── Configuration & Validation ─────────────────────────────────────────
+    "pydantic>=2.7.0",             # Data validation (v2)
+    "pydantic-settings>=2.3.0",    # Settings management with .env support
+    "python-dotenv>=1.0.0",        # Loads .env into os.environ
+
+    # ── Authentication ─────────────────────────────────────────────────────
+    "PyJWT>=2.8.0",                # JWT decoding
+    "cryptography>=42.0.0",        # RSA key support for PyJWT (RS256)
+    "httpx>=0.27.0",               # Async HTTP client (used for JWKS fetch)
+
+    # ── AI / Groq ──────────────────────────────────────────────────────────
+    "groq>=0.9.0",                 # Official Groq Python SDK
+
+    # ── Utilities ──────────────────────────────────────────────────────────
+    "python-multipart>=0.0.9",     # Required for FastAPI form data
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",               # Test runner
+    "pytest-asyncio>=0.23.0",      # Async test support (async def test_* functions)
+]

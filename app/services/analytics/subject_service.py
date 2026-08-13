@@ -9,6 +9,28 @@ from app.services.analytics.trend_service import TrendAnalyticsService
 from app.services.analytics.types import DifficultyAttemptRow, DifficultySessionRow, ResponseTimeRow
 
 
+def _build_adaptive_mastery_detail(mastery: SubjectMastery | None) -> dict | None:
+    # Straight projection of the SubjectMastery row the real adaptive engine
+    # writes (difficulty_service.py / difficulty_mastery_engine.py) — no
+    # recomputation here, so this can never drift from what actually drove
+    # difficulty selection. None for a subject with no SubjectMastery row
+    # yet (never attempted) rather than a row full of made-up defaults.
+    if mastery is None:
+        return None
+    return {
+        "mastery_score": mastery.mastery_score,
+        "fluency_score": mastery.fluency_score,
+        "confidence_score": mastery.confidence_score,
+        "evidence_count": mastery.evidence_count,
+        "recent_accuracy": mastery.recent_accuracy,
+        "previous_accuracy": mastery.previous_accuracy,
+        "trend_score": mastery.trend_score,
+        "trend_label": mastery.trend_label,
+        "retention_score": mastery.retention_score,
+        "last_mastery_update": mastery.last_mastery_update,
+    }
+
+
 def build_difficulty_performance_by_subject(
     attempt_rows: list[DifficultyAttemptRow], session_rows: list[DifficultySessionRow],
 ) -> dict[str, dict[str, dict]]:
@@ -132,9 +154,11 @@ class SubjectAnalyticsService:
             "demotion_threshold": mastery_info["demotion_threshold"],
             "quizzes_required_for_promotion": mastery_info["quizzes_required_for_promotion"],
             "promotion_progress_percentage": mastery_info["promotion_progress_percentage"],
+            "promotion_readiness": mastery_info["promotion_readiness"],
             "next_difficulty": mastery_info["next_difficulty"],
             "difficulty_status_message": mastery_info["difficulty_status_message"],
             "mastery_score": mastery["mastery_score"],
             "mastery_level": mastery["mastery_level"],
             "mastery_components": mastery["mastery_components"],
+            "adaptive_mastery": _build_adaptive_mastery_detail(self._mastery_by_subject.get(subject)),
         }

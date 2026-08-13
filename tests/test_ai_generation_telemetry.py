@@ -22,6 +22,7 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.models.ai_generation_event import AIGenerationEvent
 from app.models.question import Question
+from app.models.subject_mastery import SubjectMastery
 from app.services.quiz_service import get_or_create_user
 from tests.conftest import TEST_CLERK_ID
 
@@ -48,6 +49,25 @@ def _fake_question(i: int, lesson: str = "Algebra") -> dict:
     }
 
 
+def _generate_questions_mock() -> AsyncMock:
+    # A challenge-zone quiz (no explicit difficulty/lesson) calls
+    # generate_questions() once per difficulty tier, each asking for a
+    # different `question_count` — so the mock must actually honor that
+    # kwarg (and hand back distinct questions across calls) rather than
+    # always returning one fixed-size batch, or the totals below won't add
+    # up to what was requested.
+    counter = {"i": 0}
+
+    async def _side_effect(*, grade, subject, difficulty, question_count, **_kwargs):
+        batch = []
+        for _ in range(question_count):
+            batch.append(_fake_question(counter["i"]))
+            counter["i"] += 1
+        return batch
+
+    return AsyncMock(side_effect=_side_effect)
+
+
 async def _latest_event(db) -> AIGenerationEvent:
     stmt = select(AIGenerationEvent).order_by(AIGenerationEvent.id.desc()).limit(1)
     return (await db.execute(stmt)).scalar_one()
@@ -67,10 +87,7 @@ async def _seed_cached_questions(db, subject: str, difficulty: str, lesson: str,
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def test_successful_generation_records_telemetry(client, db_session):
-    fake_batch = [_fake_question(i) for i in range(5)]
-    with patch(
-        "app.services.quiz_service.generate_questions", new=AsyncMock(return_value=fake_batch)
-    ):
+    with patch("app.services.quiz_service.generate_questions", new=_generate_questions_mock()):
         resp = await client.post(GENERATE_URL, json={"subject": "Mathematics", "question_count": 5})
 
     assert resp.status_code == 201
@@ -142,13 +159,62 @@ async def test_failed_generation_without_fallback_still_records_telemetry(client
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 3b. Challenge-zone quizzes must respect a shared Groq call budget
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def test_challenge_zone_never_exceeds_generation_call_budget(client, db_session):
+    # A challenge-zone quiz (no explicit difficulty/lesson) splits into
+    # multiple difficulty tiers, and each tier independently runs a
+    # dedup-retry loop -- without a shared cap, a mock that keeps returning
+    # too few questions (forcing every tier to exhaust its own retries)
+    # could balloon into far more Groq calls than one "generate quiz" tap
+    # should ever cost. This is a regression test for exactly that: before
+    # the shared _CallBudget existed, this scenario made ~12 calls instead
+    # of being capped at GROQ_MAX_GENERATION_CALLS_PER_REQUEST.
+    user = await get_or_create_user(db_session, TEST_CLERK_ID)
+    # Seed mastery in the medium band so the challenge-zone profile spreads
+    # question_count=10 across all three tiers (easy/medium/hard all > 0),
+    # maximizing the number of independent dedup-retry loops in play.
+    db_session.add(SubjectMastery(
+        user_id=user.id, subject="Mathematics", difficulty="medium",
+        last_accuracy=70.0, consecutive_strong=0, consecutive_weak=0,
+        mastery_score=70.0, fluency_score=50.0, confidence_score=50.0, evidence_count=20,
+    ))
+    # Seed cached questions at every tier so that once the shared budget
+    # runs out for a later tier, it can still fall back to cache and the
+    # request succeeds overall -- the point of this test is the call count,
+    # not whether cache happens to be empty.
+    await _seed_cached_questions(db_session, "Mathematics", "easy", "Algebra", count=10)
+    await _seed_cached_questions(db_session, "Mathematics", "medium", "Algebra", count=10)
+    await _seed_cached_questions(db_session, "Mathematics", "hard", "Algebra", count=10)
+
+    call_count = {"n": 0}
+
+    async def _always_one_question(*, grade, subject, difficulty, question_count, **_kwargs):
+        # Always returns exactly 1 question, no matter how many were asked
+        # for -- guarantees every tier's dedup loop exhausts all 3 attempts
+        # (each attempt still short of `question_count`) unless the shared
+        # budget cuts it off first.
+        call_count["n"] += 1
+        return [_fake_question(call_count["n"])]
+
+    with patch(
+        "app.services.quiz_service.generate_questions",
+        new=AsyncMock(side_effect=_always_one_question),
+    ):
+        resp = await client.post(GENERATE_URL, json={"subject": "Mathematics", "question_count": 10})
+
+    assert resp.status_code == 201
+    assert call_count["n"] <= settings.GROQ_MAX_GENERATION_CALLS_PER_REQUEST
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 4. Telemetry write failure must not break quiz generation
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def test_telemetry_write_failure_does_not_break_generation(client, db_session):
-    fake_batch = [_fake_question(i) for i in range(3)]
     with (
-        patch("app.services.quiz_service.generate_questions", new=AsyncMock(return_value=fake_batch)),
+        patch("app.services.quiz_service.generate_questions", new=_generate_questions_mock()),
         patch(
             "app.services.quiz_service.telemetry_service.record_generation_event",
             new=AsyncMock(side_effect=RuntimeError("simulated telemetry failure")),
