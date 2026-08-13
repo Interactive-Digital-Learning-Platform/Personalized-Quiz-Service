@@ -27,10 +27,7 @@ class LessonMastery(Base):
     consecutive_strong: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     consecutive_weak: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
-    # Continuous Evidence-Weighted Mastery System — see
-    # app/services/difficulty_mastery_engine.py for the formulas that
-    # produce these. Safe defaults below match a brand-new student
-    # (neutral mastery, zero confidence, no evidence yet).
+    # See difficulty_mastery_engine.py for the formulas. Defaults match a brand-new student.
     mastery_score: Mapped[float] = mapped_column(Float, nullable=False, default=50.0)
     fluency_score: Mapped[float] = mapped_column(Float, nullable=False, default=50.0)
     confidence_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)

@@ -20,16 +20,12 @@ logger = logging.getLogger(__name__)
 
 _groq_client = AsyncGroq(api_key=settings.GROQ_API_KEY)
 
-# Only these are worth retrying — rate limits, timeouts, dropped connections,
-# and Groq-side 5xx are transient. Everything else (bad auth, bad request)
-# would just fail the same way again, so those raise immediately instead.
+# Transient only -- bad auth/request would just fail the same way again.
 _TRANSIENT_GROQ_ERRORS = (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError)
 
 
 async def _create_chat_completion_with_retry(*, messages: list[dict]):
-    # Retries transient Groq errors with backoff + jitter. Without this, one
-    # rate-limit blip used to fail the whole quiz generation and fall back to
-    # the (often near-empty) DB cache far more often than it should have.
+    # Backoff + jitter so one rate-limit blip doesn't fall back to cache.
     last_exc: Exception | None = None
     for attempt in range(settings.GROQ_MAX_RETRIES + 1):
         try:
@@ -65,24 +61,11 @@ async def generate_questions(
     adaptive_context: str | None = None,
     telemetry: dict | None = None,
 ) -> list[dict]:
-    # Asks Groq for `question_count` MCQs and hands back a validated list of
-    # dicts (question/options/correct_answer/explanation/lesson). If `lesson`
-    # is omitted, each question gets its own randomly varied lesson instead
-    # of the whole quiz being pinned to one topic. `existing_questions` are
-    # passed to the model so it knows what not to repeat; `avoid_lessons`
-    # nudges it toward topic variety across separate quiz generations, not
-    # just within one quiz.
-    #
-    # `preferred_lessons` and `adaptive_context` are optional, additive hints
-    # from the adaptive-mastery engine (weak lessons to weight coverage
-    # toward, and a short plain-language note about the student's current
-    # standing) — both default to None and change nothing about the prompt
-    # when omitted, so every existing caller (and the lesson-pinned branch,
-    # which never receives them) behaves exactly as before. Only ever a
-    # short natural-language hint — never raw DB rows/ids/scores, per the
-    # "don't expose unnecessary internal DB details to the LLM" requirement.
-    #
-    # Raises HTTPException(502) on any Groq/parsing failure.
+    # Requests `question_count` MCQs; if `lesson` is omitted each question
+    # gets its own random lesson. `preferred_lessons`/`adaptive_context` are
+    # optional adaptive-mastery hints (weak lessons, plain-language standing)
+    # -- bands/names only, never raw DB rows/scores. Raises HTTPException(502)
+    # on any Groq/parsing failure.
     existing_questions = existing_questions or []
     avoid_lessons = avoid_lessons or []
     random_lessons = lesson is None
@@ -247,10 +230,7 @@ QUALITY RULES:
         explanation = str(q.get("explanation", "")).strip()
         q_lesson = lesson if lesson else (str(q.get("lesson", "")).strip() or subject)
 
-        # Must have exactly 4 options (Groq occasionally ignores that rule
-        # and returns 5+). Truncating to 4 risks losing the actual correct
-        # answer, so a bad-count question is dropped entirely rather than
-        # patched up — the caller's retry loop tops up the shortfall.
+        # Drop rather than truncate a bad-count question -- could lose the correct answer.
         if not question_text or not isinstance(options, list) or len(options) != 4:
             logger.warning(
                 "Skipping malformed question at index %d: expected 4 options, got %d",
@@ -258,11 +238,7 @@ QUALITY RULES:
             )
             continue
 
-        # correct_answer has to actually match one of the options (exact, or
-        # case/whitespace-insensitive). If it matches neither, there's no way
-        # to know which option is really correct — dropping it beats the old
-        # behavior of defaulting to options[0] and mislabeling a wrong answer
-        # as correct.
+        # Drop if correct_answer matches no option -- beats defaulting to options[0].
         if correct not in options:
             match = next((o for o in options if o.strip().lower() == correct.strip().lower()), None)
             if match is None:
@@ -296,12 +272,8 @@ QUALITY RULES:
 
 
 async def generate_feedback(analytics_summary: dict) -> dict:
-    # Turns the user's analytics into a short, personalised pep talk from
-    # Groq. `analytics_summary["recommendations"]` is deterministic and
-    # database-driven (see recommendation_service.py, no AI involved) — the
-    # prompt tells Groq to treat it as ground truth and build suggestions
-    # from it rather than inventing its own analysis, so the AI's wording
-    # stays consistent with the numbers shown elsewhere in the app.
+    # `recommendations` is deterministic/DB-driven (recommendation_service.py) --
+    # the prompt treats it as ground truth so the AI's wording stays consistent.
     system_prompt = """You are a knowledgeable and encouraging study coach for school students.
 Analyse the student's quiz performance data and provide personalised feedback.
 

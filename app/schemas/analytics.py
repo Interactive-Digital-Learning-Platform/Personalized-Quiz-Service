@@ -21,12 +21,8 @@ class MasteryComponents(BaseModel):
 
 
 class AdaptiveMasteryDetail(BaseModel):
-    # Output of the Continuous Evidence-Weighted Mastery System
-    # (SubjectMastery / app/services/difficulty_mastery_engine.py) — the
-    # actual driver of difficulty selection. Distinct from
-    # mastery_score/mastery_level/mastery_components above, which are a
-    # separate, analytics-only display metric (app/services/mastery_service.py)
-    # that never affects difficulty.
+    # The actual driver of difficulty selection -- distinct from the
+    # analytics-only mastery_score/mastery_level/mastery_components above.
     mastery_score: float
     fluency_score: float
     confidence_score: float

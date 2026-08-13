@@ -1,12 +1,9 @@
 """add adaptive mastery fields
 
-Extends subject_mastery and lesson_mastery with the columns the Continuous
-Evidence-Weighted Mastery System needs (mastery_score, fluency_score,
-confidence_score, evidence_count, recent_accuracy, previous_accuracy,
-trend_score, trend_label, retention_score, last_mastery_update). Purely
-additive — existing columns (difficulty, last_accuracy, consecutive_strong,
-consecutive_weak) are untouched, and every new column has a server-side
-default so existing rows stay valid without a data migration.
+Additive: adds mastery_score/fluency_score/confidence_score/evidence_count/
+recent_accuracy/previous_accuracy/trend_score/trend_label/retention_score/
+last_mastery_update to subject_mastery and lesson_mastery, each with a
+server-side default so existing rows stay valid.
 
 Revision ID: c2bf4d16bb87
 Revises: 606da8e8c01d

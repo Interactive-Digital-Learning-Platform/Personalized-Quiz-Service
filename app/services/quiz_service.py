@@ -53,9 +53,7 @@ def _serialize_question(question: Question) -> dict:
 async def _get_recent_lessons(
     db: AsyncSession, user_id: int, subject: str, limit: int = 6
 ) -> list[str]:
-    # Lessons this user was recently quizzed on, most recent first — fed to
-    # generate_questions() as "please avoid these" so someone who just keeps
-    # hitting "generate" on the same subject still gets some topic variety.
+    # Recently quizzed lessons, fed to generate_questions() as "avoid these" for variety.
     stmt = (
         select(QuizSession.lesson)
         .where(QuizSession.user_id == user_id, QuizSession.subject == subject)
@@ -97,9 +95,7 @@ def _jaccard_similarity(a: str, b: str) -> float:
 
 
 def _is_near_duplicate(candidate: str, existing: list[str], threshold: float = 0.55) -> bool:
-    # Two questions count as "the same" if they share 55%+ of their
-    # meaningful words (stop words and short filler words ignored) — catches
-    # Groq rephrasing a question it was already asked not to repeat.
+    # Same question if 55%+ of meaningful words overlap — catches Groq rephrasing.
     for ex in existing:
         if _jaccard_similarity(candidate, ex) >= threshold:
             return True
@@ -123,12 +119,9 @@ async def get_or_create_user(db: AsyncSession, clerk_id: str) -> User:
 
 @dataclass
 class _CallBudget:
-    # Shared, mutable across every tier of one generate_quiz() request — a
-    # challenge-zone quiz calls _generate_or_cache_tier() once per difficulty
-    # tier, and each of those independently runs a dedup-retry loop, so
-    # without a shared cap a single "generate quiz" tap could fire off far
-    # more Groq calls than a user action should ever cost (and did: this is
-    # what was tripping Groq's 429 rate limit before this budget existed).
+    # Shared across every tier of one request -- caps total Groq calls
+    # since each tier otherwise retries independently (this is what was
+    # tripping Groq's 429 rate limit before this budget existed).
     remaining: int
 
     def consume(self) -> bool:
@@ -187,10 +180,7 @@ async def _generate_or_cache_tier(
             existing_texts_stmt = select(Question.question).where(*existing_texts_filter)
             existing_texts: list[str] = list((await db.execute(existing_texts_stmt)).scalars().all())
 
-            # Ask Groq for questions, drop any that are near-duplicates of
-            # ones we already have, and if we're short, ask again for just
-            # the remainder — up to 3 rounds. Keeps whatever unique set we
-            # end up with even if a narrow topic can't fill the full count.
+            # Drop near-duplicates, ask again for the remainder, up to 3 rounds.
             needed = question_count
             deduped_ai: list[dict] = []
             local_seen = seen_texts + existing_texts
@@ -252,10 +242,7 @@ async def _generate_or_cache_tier(
                 )
                 generation_calls_made += 1
             else:
-                # Budget exhausted before this tier got anything from AI at
-                # all — treat it the same as an AI failure so this tier
-                # falls back to cache instead of silently returning zero
-                # questions.
+                # No budget left and nothing from AI -- fall back to cache like an AI failure.
                 raise HTTPException(
                     status_code=status.HTTP_502_BAD_GATEWAY,
                     detail="Generation call budget exhausted for this request.",
@@ -296,11 +283,7 @@ async def _generate_or_cache_tier(
         result = await db.execute(cached_stmt)
         questions = list(result.scalars().all())
 
-        # Deliberately NOT raised here — the caller aggregates cache_hit/
-        # ai_failed across every tier first (a challenge-zone quiz calls
-        # this per tier) and raises itself once that's done, so telemetry
-        # always reflects the full picture even when an earlier tier
-        # already succeeded before a later one hit this.
+        # Not raised here -- the caller aggregates across tiers and raises once, after.
 
         logger.info(
             "Served from DB cache: subject=%s, lesson=%s, difficulty=%s — %d questions (ai_failed=%s, force=%s)",
@@ -316,17 +299,8 @@ async def generate_quiz(
     clerk_id: str,
     payload: GenerateQuizRequest,
 ) -> tuple[QuizSession, list[Question], bool, str, str]:
-    # AI-first: every request calls Groq for a fresh set of questions, so a
-    # quiz is never silently served from the DB unless AI generation actually
-    # fails (or the caller explicitly asks for the cached fallback via
-    # force_cache, e.g. after already seeing an AI failure once).
-    #
-    # The caller only has to send subject + question_count. Lesson and
-    # difficulty are both picked automatically: lesson defaults to "let the
-    # AI assign a different random lesson per question" rather than pinning
-    # the whole quiz to one topic; difficulty comes from the user's accuracy
-    # history via difficulty_service, tracked independently per subject (or
-    # per subject+lesson if a lesson override was given).
+    # AI-first: only falls back to the DB cache if generation fails or
+    # force_cache is set. Lesson/difficulty are auto-picked unless overridden.
     start_time = time.monotonic()
     user = await get_or_create_user(db, clerk_id)
 
@@ -338,16 +312,9 @@ async def generate_quiz(
         else await difficulty_service.get_subject_difficulty(db, user.id, payload.subject)
     )
 
-    # Challenge zone + weak-lesson targeting: only for the fully-automatic
-    # path (no explicit lesson pin, no explicit difficulty override) — an
-    # explicit override of either bypasses adaptive generation entirely,
-    # exactly as before. When active, this spreads the quiz's questions
-    # across 2-3 difficulty tiers (see
-    # difficulty_mastery_engine.CHALLENGE_ZONE_DISTRIBUTION) instead of one,
-    # and nudges the AI toward the subject's weakest lessons — but the
-    # underlying per-tier generation/cache-fallback logic
-    # (_generate_or_cache_tier) is exactly the single-difficulty path this
-    # always used, just called once per tier instead of once total.
+    # Challenge zone: only when neither lesson nor difficulty is overridden.
+    # Spreads questions across 2-3 difficulty tiers (CHALLENGE_ZONE_DISTRIBUTION)
+    # and nudges toward weak lessons, each tier reusing the same single-difficulty path.
     challenge_zone_active = lesson is None and payload.difficulty is None
     tier_plan: list[tuple[str, int]] = [(difficulty, payload.question_count)]
     preferred_lessons: list[str] | None = None
@@ -371,9 +338,7 @@ async def generate_quiz(
     ai_succeeded = False
     questions: list[Question] = []
 
-    # Telemetry is recorded in the `finally` block below no matter how this
-    # function exits, purely for internal monitoring — it never affects what
-    # gets returned to the caller.
+    # Telemetry is recorded in `finally` below regardless of outcome; purely internal.
     created_session_id: int | None = None
     error_category: str | None = None
     generation_calls_made = 0
@@ -408,11 +373,7 @@ async def generate_quiz(
                 call_budget=call_budget,
             )
             questions.extend(tier_questions)
-            # A challenge-zone quiz spans several tiers — if ANY of them had
-            # to fall back to cache, or ANY of them got fresh AI questions,
-            # that's still worth reflecting in the aggregate flags returned
-            # to the caller/telemetry, rather than only reflecting the last
-            # tier processed.
+            # Aggregate across tiers rather than only reflecting the last one.
             cache_hit = cache_hit or tier_cache_hit
             ai_failed = ai_failed or tier_ai_failed
             ai_succeeded = ai_succeeded or tier_ai_succeeded
@@ -427,12 +388,9 @@ async def generate_quiz(
                     detail="AI question generation failed and no cached questions are available for this topic yet.",
                 )
 
-        # `difficulty` above is only the fallback single-tier value; for a
-        # challenge-zone quiz whose questions actually ended up spanning more
-        # than one difficulty, reflect that on the session the same way
-        # session_lesson already becomes "Mixed" when per-question lessons
-        # vary. QuestionAttempt/analytics always read each question's own
-        # Question.difficulty regardless, so this is cosmetic/summary only.
+        # Cosmetic only: session.difficulty becomes "Mixed" if tiers actually
+        # varied (same idea as session_lesson becoming "Mixed"); grading always
+        # reads each question's own Question.difficulty.
         if len(tier_plan) > 1:
             distinct_tier_difficulties = {q.difficulty for q in questions}
             if len(distinct_tier_difficulties) > 1:
@@ -462,11 +420,7 @@ async def generate_quiz(
         await db.refresh(session)
         created_session_id = session.id
 
-        # No per-question refresh here on purpose — every Question object
-        # already has its id (from the flush()'s RETURNING clause, or from
-        # the cache SELECT), so refreshing each one individually would just
-        # be an extra DB round-trip per question for no benefit. That used to
-        # add several seconds per quiz over Neon's network latency.
+        # No per-question refresh -- ids are already set (flush RETURNING or cache SELECT).
 
         logger.info(
             "Created QuizSession id=%d for user=%d with %d questions at lesson=%s, difficulty=%s",
@@ -479,11 +433,8 @@ async def generate_quiz(
             error_category = telemetry_service.categorize_generation_error(exc)
         raise
     finally:
-        # record_generation_event() already catches its own errors, but this
-        # gets a second safety net too — an exception raised inside a
-        # `finally` block replaces whatever this function was about to
-        # return/raise, so telemetry must never be allowed to blow up the
-        # actual request even in a freak case its own handling misses.
+        # Extra safety net -- an exception in `finally` would replace the real
+        # return/raise, so telemetry must never blow up the request.
         try:
             latency_ms = (time.monotonic() - start_time) * 1000.0
             await telemetry_service.record_generation_event(
@@ -512,9 +463,7 @@ async def submit_quiz(
     clerk_id: str,
     payload: SubmitQuizRequest,
 ) -> dict:
-    # Grading happens entirely server-side — the frontend only ever sends
-    # what the user picked, never the correct answers, so there's nothing to
-    # tamper with client-side.
+    # Grading is server-side -- the client never receives correct answers to tamper with.
     user = await get_or_create_user(db, clerk_id)
 
     session = await _get_owned_session(db=db, user_id=user.id, session_id=payload.session_id)
@@ -647,12 +596,8 @@ async def submit_quiz(
         session.id, correct_count, total_questions, accuracy, total_time,
     )
 
-    # Feed this result back into adaptive difficulty — lesson-level first
-    # (for the explicit-lesson-override flow), then subject-level (what
-    # actually drives the default quiz flow), since the subject-level
-    # update rolls up the just-updated LessonMastery rows and needs them
-    # to be current. Non-critical: never let this fail the submission
-    # response itself.
+    # Lesson-level first, then subject-level (which rolls up lesson mastery
+    # and needs it fresh). Non-critical: must never fail the submission itself.
     try:
         await difficulty_service.update_mastery_after_submission(
             db=db,
