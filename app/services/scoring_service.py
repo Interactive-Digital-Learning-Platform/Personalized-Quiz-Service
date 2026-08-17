@@ -1,3 +1,4 @@
+import itertools
 import statistics
 from datetime import datetime, timedelta
 
@@ -210,7 +211,7 @@ def compute_repeated_question_group_stats(ordered_corrects: list[bool]) -> dict[
 
     corrected_previous_mistakes = 0
     repeated_same_mistakes = 0
-    for prev_correct, cur_correct in zip(ordered_corrects, ordered_corrects[1:]):
+    for prev_correct, cur_correct in itertools.pairwise(ordered_corrects):
         if not prev_correct and cur_correct:
             corrected_previous_mistakes += 1
         elif not prev_correct and not cur_correct:
@@ -226,7 +227,7 @@ def compute_repeated_question_group_stats(ordered_corrects: list[bool]) -> dict[
 
 
 def aggregate_repeated_question_stats(group_stats: list[dict[str, int]]) -> dict:
-    totals = {
+    totals: dict[str, int | float] = {
         "repeated_question_count": 0,
         "repeated_correct_count": 0,
         "repeated_incorrect_count": 0,

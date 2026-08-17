@@ -2,7 +2,8 @@ import asyncio
 import json
 import logging
 import random
-from datetime import datetime, timezone
+from collections.abc import Iterable
+from datetime import UTC, datetime
 
 from fastapi import HTTPException, status
 from groq import (
@@ -13,6 +14,7 @@ from groq import (
     InternalServerError,
     RateLimitError,
 )
+from groq.types.chat import ChatCompletionMessageParam
 
 from app.core.config import settings
 
@@ -26,7 +28,7 @@ _groq_client = AsyncGroq(api_key=settings.GROQ_API_KEY)
 _TRANSIENT_GROQ_ERRORS = (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError)
 
 
-async def _create_chat_completion_with_retry(*, messages: list[dict]):
+async def _create_chat_completion_with_retry(*, messages: Iterable[ChatCompletionMessageParam]):
     # Retries transient Groq errors with backoff + jitter. Without this, one
     # rate-limit blip used to fail the whole quiz generation and fall back to
     # the (often near-empty) DB cache far more often than it should have.
@@ -50,6 +52,10 @@ async def _create_chat_completion_with_retry(*, messages: list[dict]):
                 type(exc).__name__, attempt + 1, settings.GROQ_MAX_RETRIES + 1, delay, exc,
             )
             await asyncio.sleep(delay)
+    # The loop only falls through here after `last_exc` has been set (it
+    # exits via `break` right after catching one) -- assert makes that
+    # invariant explicit for the type checker too.
+    assert last_exc is not None
     raise last_exc
 
 
@@ -130,7 +136,7 @@ QUALITY RULES:
 - Do NOT output anything outside the JSON object.
 """
 
-    seed_context = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    seed_context = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
     exclusion_block = ""
     if existing_questions:
@@ -377,5 +383,5 @@ Keep suggestions practical and achievable for a school student.
         "motivational_note": feedback.get(
             "motivational_note", "Great effort! Keep going — consistency is key."
         ),
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
     }

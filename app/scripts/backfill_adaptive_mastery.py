@@ -23,7 +23,6 @@ users' history rescored against the new weights.
 import argparse
 import asyncio
 import logging
-from collections import defaultdict
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession

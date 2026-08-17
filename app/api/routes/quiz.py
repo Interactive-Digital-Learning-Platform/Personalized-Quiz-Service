@@ -1,9 +1,10 @@
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
 from app.core.security import get_current_user
@@ -22,8 +23,6 @@ from app.schemas.quiz import (
     SubmitQuizResponse,
 )
 from app.services.analytics_service import update_analytics_after_submission
-from sqlalchemy.orm import selectinload
-
 from app.services.quiz_service import (
     generate_quiz,
     get_or_create_user,
@@ -185,7 +184,8 @@ async def get_saved_quiz_session(
     questions = []
     for question in questions_data:
         enriched_question = dict(question)
-        db_question = question_map.get(question.get("id"))
+        question_id = question.get("id")
+        db_question = question_map.get(question_id) if question_id is not None else None
         if db_question is not None and enriched_question.get("correct_answer") is None:
             enriched_question["correct_answer"] = db_question.correct_answer
         questions.append(QuestionOut.model_validate(enriched_question))
@@ -280,7 +280,7 @@ async def delete_quiz_session(
     # for lesson-variety history, and the difficulty-adaptation tables key off
     # of it too — losing that data on delete would make the AI forget what
     # you've already studied.
-    session.deleted_at = datetime.now(timezone.utc)
+    session.deleted_at = datetime.now(UTC)
     await db.commit()
 
     # The old per-subject Analytics row only updates when you submit a quiz,
@@ -351,9 +351,7 @@ async def submit_quiz_endpoint(
             clerk_id=clerk_id,
             session_id=payload.session_id,
         )
-    except Exception as exc:
-        # If analytics fails to update, the quiz result should still go through —
-        # the user just cares about seeing their score right now.
+    except Exception as exc:  # noqa: BLE001 — non-critical, the quiz result must still go through
         logger.error("Analytics update failed (non-critical): %s", exc)
 
     return SubmitQuizResponse(**metrics)
@@ -390,7 +388,7 @@ async def submit_timeout_quiz_endpoint(
             clerk_id=clerk_id,
             session_id=payload.session_id,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — non-critical, the quiz result must still go through
         logger.error("Analytics update failed (non-critical): %s", exc)
 
     return SubmitQuizResponse(**metrics)

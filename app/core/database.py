@@ -1,3 +1,5 @@
+from collections.abc import AsyncGenerator
+
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -12,7 +14,7 @@ from app.core.config import settings
 database_url = settings.DATABASE_URL
 database_url_obj = make_url(database_url)
 
-engine_kwargs = {
+engine_kwargs: dict[str, object] = {
     "future": True,
     "echo": (settings.ENVIRONMENT == "development"),
     "pool_pre_ping": True,
@@ -40,9 +42,12 @@ class Base(DeclarativeBase):
     pass
 
 
-async def get_db() -> AsyncSession:  # type: ignore[override]
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
     # FastAPI calls this per-request via Depends(get_db) — the `async with`
     # takes care of closing (and rolling back on error) once the request ends.
+    # Every call site types its own `db: AsyncSession = Depends(get_db)`
+    # explicitly, so this function's own return type doesn't need to lie
+    # about being AsyncSession for that injection to work.
     async with AsyncSessionLocal() as session:
         try:
             yield session

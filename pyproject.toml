@@ -37,3 +37,20 @@ dev = [
     "pytest>=8.0.0",               # Test runner
     "pytest-asyncio>=0.23.0",      # Async test support (async def test_* functions)
 ]
+
+[tool.ruff.lint.flake8-bugbear]
+# `param: X = Depends(...)` (and friends) is FastAPI's own dependency-
+# injection idiom, not the mutable-default-argument bug B008 exists to
+# catch -- these calls return lightweight marker objects, not shared state.
+# See https://fastapi.tiangolo.com/tutorial/dependencies/#to-async-or-not-to-async
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.params.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.Header",
+    "fastapi.Cookie",
+    "fastapi.Form",
+    "fastapi.File",
+]

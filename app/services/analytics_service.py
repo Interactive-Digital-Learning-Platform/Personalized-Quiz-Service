@@ -1,12 +1,14 @@
 import logging
 
-from sqlalchemy import Integer, cast, select, func
+from sqlalchemy import Integer, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.analytics import Analytics
-from app.models.quiz_session import QuizSession, QuestionAttempt
 from app.models.question import Question
-from app.services.analytics.orchestrator import get_user_analytics as _get_user_analytics
+from app.models.quiz_session import QuestionAttempt, QuizSession
+from app.services.analytics.orchestrator import (
+    get_user_analytics as _get_user_analytics,
+)
 from app.services.analytics.queries import valid_response_time_case
 from app.services.quiz_service import get_or_create_user
 from app.services.scoring_service import identify_weak_topic
@@ -64,7 +66,7 @@ async def update_analytics_after_submission(
         select(QuestionAttempt.question_id)
         .where(
             QuestionAttempt.session_id == session_id,
-            QuestionAttempt.correct == False,  # noqa: E712
+            QuestionAttempt.correct == False, 
         )
     )
     wrong_result = await db.execute(wrong_stmt)

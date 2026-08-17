@@ -49,7 +49,7 @@ async def get_my_profile(
     summary="Sync user from Clerk",
     description=(
         "Explicitly provisions or updates the user record. "
-        "Call this from the Clerk webhook or after login to ensure the user exists."
+        "Call this after login to ensure the user exists (no Clerk webhook is configured)."
     ),
 )
 async def sync_user(

@@ -1,5 +1,6 @@
 import statistics
 from datetime import date
+from itertools import pairwise
 
 from app.services.mastery_service import compute_consistency_score as _score_stability
 
@@ -30,7 +31,7 @@ def compute_session_spacing_score(active_dates: list[date], *, neutral_score: fl
     ordered = sorted(set(active_dates))
     if len(ordered) < 3:
         return neutral_score
-    gaps = [(b - a).days for a, b in zip(ordered, ordered[1:])]
+    gaps = [(b - a).days for a, b in pairwise(ordered)]
     mean_gap = statistics.mean(gaps)
     if mean_gap == 0:
         return 100.0
