@@ -4,12 +4,12 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 from fastapi import HTTPException, status
-from sqlalchemy import select, func
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.question import Question
-from app.models.quiz_session import QuizSession, QuestionAttempt
+from app.models.quiz_session import QuestionAttempt, QuizSession
 from app.models.quiz_tracking import QuizCompletion, QuizProgressSnapshot
 from app.models.user import User
 from app.schemas.quiz import GenerateQuizRequest, SaveProgressRequest, SubmitQuizRequest
@@ -78,7 +78,7 @@ _STOP_WORDS = frozenset({
     "or", "which", "what", "how", "why", "when", "where", "that", "this",
     "it", "its", "be", "been", "by", "for", "with", "as", "at", "from",
     "on", "not", "does", "do", "did", "will", "would", "can", "could",
-    "following", "given", "following", "most", "one", "two", "three",
+    "following", "given", "most", "one", "two", "three",
 })
 
 
@@ -672,7 +672,7 @@ async def submit_quiz(
             ended_by=payload.ended_by,
             graded_answers=graded_answers,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — non-critical side-effect, must never fail the submission response
         logger.error("Difficulty mastery update failed (non-critical): %s", exc)
 
     return {

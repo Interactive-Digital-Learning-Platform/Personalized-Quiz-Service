@@ -1,4 +1,3 @@
-from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,7 +19,7 @@ class Settings(BaseSettings):
 
     CLERK_JWKS_URL: str
     CLERK_ISSUER: str
-    CLERK_AUDIENCE: Optional[str] = None
+    CLERK_AUDIENCE: str | None = None
     AUTH_BYPASS: bool = False
     ADMIN_CLERK_IDS: str = ""
 
@@ -200,4 +199,7 @@ class Settings(BaseSettings):
     )
 
 
-settings = Settings()
+# Required fields (DATABASE_URL, GROQ_API_KEY, CLERK_JWKS_URL, CLERK_ISSUER)
+# come from the environment / .env at runtime via pydantic-settings, not
+# constructor arguments -- static analysis can't see that, hence the ignore.
+settings = Settings()  # type: ignore[call-arg]

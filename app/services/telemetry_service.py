@@ -80,8 +80,8 @@ async def record_generation_event(
         logger.error("Failed to record AI generation telemetry (non-critical): %s", exc)
         try:
             await db.rollback()
-        except Exception:
-            pass
+        except Exception as rollback_exc:  # noqa: BLE001 — best-effort cleanup, must not raise
+            logger.error("Rollback after failed telemetry write also failed (non-critical): %s", rollback_exc)
 
 
 async def get_ai_generation_analytics(

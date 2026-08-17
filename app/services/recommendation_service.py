@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 # Lower = more urgent, and this is the PRIMARY sort key — severity (below)
 # only breaks ties within the same type, so a "weak_topic" always outranks a
@@ -249,7 +249,7 @@ def generate_recommendations(
     if settings_obj is None:
         from app.core.config import settings as settings_obj
     if now is None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
     candidates = _build_candidates(analytics, settings_obj=settings_obj)
     if not candidates:

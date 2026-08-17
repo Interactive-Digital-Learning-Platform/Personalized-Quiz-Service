@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, JSON, String, func
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -34,7 +34,7 @@ class QuizProgressSnapshot(Base):
         nullable=False,
     )
 
-    session: Mapped["QuizSession"] = relationship("QuizSession", back_populates="progress_snapshots")
+    session: Mapped[QuizSession] = relationship("QuizSession", back_populates="progress_snapshots")
 
 
 class QuizCompletion(Base):
@@ -68,4 +68,4 @@ class QuizCompletion(Base):
         nullable=False,
     )
 
-    session: Mapped["QuizSession"] = relationship("QuizSession", back_populates="completion")
+    session: Mapped[QuizSession] = relationship("QuizSession", back_populates="completion")

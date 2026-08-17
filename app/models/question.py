@@ -1,8 +1,13 @@
-from sqlalchemy import event, ForeignKey, Integer, JSON, String
+from typing import TYPE_CHECKING
+
+from sqlalchemy import JSON, String, event
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 from app.services.question_fingerprint import compute_question_fingerprint
+
+if TYPE_CHECKING:
+    from app.models.quiz_session import QuestionAttempt
 
 
 class Question(Base):
@@ -24,7 +29,7 @@ class Question(Base):
     # Filled in automatically by the listener below if not set explicitly.
     question_fingerprint: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
 
-    attempts: Mapped[list["QuestionAttempt"]] = relationship(  # noqa: F821
+    attempts: Mapped[list["QuestionAttempt"]] = relationship(
         "QuestionAttempt", back_populates="question", cascade="all, delete-orphan"
     )
 

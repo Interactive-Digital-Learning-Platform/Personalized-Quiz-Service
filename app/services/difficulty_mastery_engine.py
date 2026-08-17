@@ -18,12 +18,16 @@ nothing here should hardcode a magic number that belongs there.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Protocol
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from app.core.config import settings
 from app.services.scoring_service import compute_performance_trend
+
+if TYPE_CHECKING:
+    from app.models.lesson_mastery import LessonMastery
 
 
 def _clamp(value: float, lo: float = 0.0, hi: float = 100.0) -> float:
@@ -101,7 +105,7 @@ def _retention_weight_for_gap(days_since_last_seen: float | None) -> float:
 
 
 def calculate_retention_evidence(
-    repeated_attempts: list[tuple[bool, float | None]],
+    repeated_attempts: Sequence[tuple[bool, float | None]],
 ) -> float:
     """repeated_attempts: (was_correct_this_time, days_since_previously_seen)
     for each question in this quiz that's a repeat (by fingerprint) of one
@@ -264,7 +268,7 @@ def calculate_fluency(question_fluencies: list[float]) -> float:
 
 def get_recency_weight(timestamp: datetime, *, now: datetime | None = None) -> float:
     b = settings
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     days = (now - timestamp).total_seconds() / 86400.0
     if days <= 7:
         return b.ADAPTIVE_MASTERY_RECENCY_0_TO_7_DAYS
@@ -319,7 +323,7 @@ def calculate_trend(
         window_size=window,
         min_attempts_per_period=1,
         change_threshold=settings.ADAPTIVE_MASTERY_TREND_IMPROVING_THRESHOLD,
-        now=datetime.now(timezone.utc),
+        now=datetime.now(UTC),
     )
     return TrendResult(
         recent_accuracy=result["current_period_accuracy"],
@@ -331,12 +335,7 @@ def calculate_trend(
 
 # ── Lesson -> subject roll-up ────────────────────────────────────────────
 
-class _LessonMasteryLike(Protocol):
-    mastery_score: float
-    evidence_count: int
-
-
-def rollup_lesson_mastery_to_subject(lesson_rows: list[_LessonMasteryLike]) -> float | None:
+def rollup_lesson_mastery_to_subject(lesson_rows: Sequence[LessonMastery]) -> float | None:
     """Evidence-weighted average of a subject's lessons' mastery_score,
     using log1p(evidence_count) as the weight so one heavily-practiced
     lesson can't linearly dominate the subject average the way a raw

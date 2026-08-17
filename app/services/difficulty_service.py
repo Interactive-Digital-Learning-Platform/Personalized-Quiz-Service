@@ -1,7 +1,6 @@
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Protocol
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,47 +17,29 @@ logger = logging.getLogger(__name__)
 
 DIFFICULTY_LEVELS = ["easy", "medium", "hard"]
 DEFAULT_DIFFICULTY = "easy"
-# Canonical definition now lives in difficulty_mastery_engine.py (which this
-# module depends on); re-exported here since app/services/analytics/
-# mastery_service.py reads it as difficulty_service.DIFFICULTY_BASE_SCORES.
+# Re-exported for app/services/analytics/mastery_service.py, which reads it
+# as difficulty_service.DIFFICULTY_BASE_SCORES.
 DIFFICULTY_BASE_SCORES = engine.DIFFICULTY_BASE_SCORES
 
-# Legacy streak-based thresholds. consecutive_strong/consecutive_weak still
-# update from these (kept as secondary/informational evidence per the
-# Continuous Evidence-Weighted Mastery System spec) but no longer drive
-# mastery.difficulty directly -- determine_difficulty_transition() in
-# difficulty_mastery_engine.py does that now.
+# Legacy streak thresholds -- consecutive_strong/weak still track these as
+# secondary evidence, but determine_difficulty_transition() now decides difficulty.
 PROMOTE_ACCURACY_THRESHOLD = 80.0
 DEMOTE_ACCURACY_THRESHOLD = 40.0
 PROMOTE_STREAK_REQUIRED = 2
 DEMOTE_STREAK_REQUIRED = 1
 
 
-class _MasteryRow(Protocol):
-    difficulty: str
-    last_accuracy: float
-    consecutive_strong: int
-    consecutive_weak: int
-    mastery_score: float
-    fluency_score: float
-    confidence_score: float
-    evidence_count: int
-    recent_accuracy: float | None
-    previous_accuracy: float | None
-    trend_score: float | None
-    trend_label: str
-    retention_score: float | None
-    last_mastery_update: datetime | None
+# The only two concrete row types this module ever operates on -- a plain
+# Union here (rather than a structural Protocol) avoids a known false-positive
+# where SQLAlchemy's Mapped[T] class attributes don't structurally satisfy a
+# Protocol that redeclares the same attributes as plain mutable T.
+_MasteryRow = LessonMastery | SubjectMastery
 
 
 @dataclass
 class GradedAnswer:
-    """One graded question from a submission, as much as the mastery engine
-    needs -- built once by quiz_service.submit_quiz() (which already grades
-    each answer) and passed to both update_mastery_after_submission() and
-    update_subject_mastery_after_submission() so neither has to re-derive
-    correctness or re-fetch Question rows.
-    """
+    # Built once by quiz_service.submit_quiz() and passed to both update
+    # functions so neither has to re-derive correctness or re-fetch Question rows.
     lesson: str
     difficulty: str
     correct: bool | None
@@ -337,7 +318,7 @@ async def update_mastery_after_submission(
     ended_by: str,
     graded_answers: list[GradedAnswer],
 ) -> None:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     completion_evidence = engine.calculate_completion_evidence(
         ended_by=ended_by, answered_count=len(graded_answers), intended_count=session.question_count,
     )
@@ -436,7 +417,7 @@ async def update_subject_mastery_after_submission(
     ended_by: str,
     graded_answers: list[GradedAnswer],
 ) -> None:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     completion_evidence = engine.calculate_completion_evidence(
         ended_by=ended_by, answered_count=len(graded_answers), intended_count=session.question_count,
     )
