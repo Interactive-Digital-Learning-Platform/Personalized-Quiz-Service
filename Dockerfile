@@ -43,6 +43,13 @@ ENV PATH="/app/.venv/bin:$PATH"
 EXPOSE 8000
 
 # Start FastAPI with uvicorn
-# --host 0.0.0.0 makes the server accessible from outside the container
-# --workers 1 is fine for MVP; scale this with gunicorn in production
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --host 0.0.0.0 makes the server accessible from outside the container.
+# Worker count comes from WEB_CONCURRENCY (defaults to 1, i.e. today's
+# behavior, if unset) rather than a fixed number baked into the image, so
+# it can be tuned per-deployment without a rebuild.
+#
+# Each worker opens its own DB connection pool (see DB_POOL_SIZE/
+# DB_MAX_OVERFLOW in app/core/config.py) -- multiply by WEB_CONCURRENCY to
+# get the real total connection count against the DB, and keep that under
+# whatever ceiling your DB provider enforces.
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${WEB_CONCURRENCY:-1}"]

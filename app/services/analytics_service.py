@@ -51,6 +51,7 @@ async def update_analytics_after_submission(
             QuizSession.user_id == user.id,
             QuizSession.subject == subject,
             QuizSession.deleted_at.is_(None),
+            QuizSession.is_retake.is_(False),
             QuestionAttempt.correct.is_not(None),
         )
     )

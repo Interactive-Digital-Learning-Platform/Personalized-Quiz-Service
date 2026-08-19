@@ -16,6 +16,7 @@ from app.schemas.quiz import (
     GenerateQuizResponse,
     QuestionOut,
     QuizSessionSummary,
+    RetakeSessionResponse,
     SavedQuizResponse,
     SaveProgressRequest,
     SaveProgressResponse,
@@ -24,6 +25,7 @@ from app.schemas.quiz import (
 )
 from app.services.analytics_service import update_analytics_after_submission
 from app.services.quiz_service import (
+    create_retake_session,
     generate_quiz,
     get_or_create_user,
     save_quiz_progress,
@@ -81,6 +83,34 @@ async def generate_quiz_endpoint(
     )
 
 
+@router.post(
+    "/sessions/{session_id}/retake",
+    response_model=RetakeSessionResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Retake a completed quiz session",
+    description=(
+        "Clones the given session's questions into a brand-new session for a "
+        "'Restart Quiz' attempt. Submitting the new session is graded and shown "
+        "to the user like any other, but is excluded from analytics and "
+        "adaptive difficulty — the user already saw the correct answers."
+    ),
+)
+async def retake_quiz_session(
+    session_id: int,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> RetakeSessionResponse:
+    clerk_id: str = current_user.get("sub", "")
+    if not clerk_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token is missing the 'sub' (user ID) claim.",
+        )
+
+    retake = await create_retake_session(db=db, clerk_id=clerk_id, session_id=session_id)
+    return RetakeSessionResponse(session_id=retake.id)
+
+
 @router.get(
     "/sessions",
     response_model=list[QuizSessionSummary],
@@ -106,7 +136,14 @@ async def list_quiz_sessions(
             selectinload(QuizSession.completion),
             selectinload(QuizSession.progress_snapshots),
         )
-        .where(QuizSession.user_id == user.id, QuizSession.deleted_at.is_(None))
+        .where(
+            QuizSession.user_id == user.id,
+            QuizSession.deleted_at.is_(None),
+            # Retakes are an implementation detail of "Restart Quiz" (same
+            # questions, answers already known) — they'd just be confusing
+            # duplicate entries in the user-facing sessions list.
+            QuizSession.is_retake.is_(False),
+        )
         .order_by(QuizSession.created_at.desc())
     )
     sessions = list(sessions_result.scalars().all())
@@ -344,15 +381,17 @@ async def submit_quiz_endpoint(
     )
 
     metrics = await submit_quiz(db=db, clerk_id=clerk_id, payload=payload)
+    is_retake = metrics.pop("is_retake")
 
-    try:
-        await update_analytics_after_submission(
-            db=db,
-            clerk_id=clerk_id,
-            session_id=payload.session_id,
-        )
-    except Exception as exc:  # noqa: BLE001 — non-critical, the quiz result must still go through
-        logger.error("Analytics update failed (non-critical): %s", exc)
+    if not is_retake:
+        try:
+            await update_analytics_after_submission(
+                db=db,
+                clerk_id=clerk_id,
+                session_id=payload.session_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — non-critical, the quiz result must still go through
+            logger.error("Analytics update failed (non-critical): %s", exc)
 
     return SubmitQuizResponse(**metrics)
 
@@ -381,14 +420,16 @@ async def submit_timeout_quiz_endpoint(
 
     timeout_payload = payload.model_copy(update={"ended_by": "timeout"})
     metrics = await submit_quiz(db=db, clerk_id=clerk_id, payload=timeout_payload)
+    is_retake = metrics.pop("is_retake")
 
-    try:
-        await update_analytics_after_submission(
-            db=db,
-            clerk_id=clerk_id,
-            session_id=payload.session_id,
-        )
-    except Exception as exc:  # noqa: BLE001 — non-critical, the quiz result must still go through
-        logger.error("Analytics update failed (non-critical): %s", exc)
+    if not is_retake:
+        try:
+            await update_analytics_after_submission(
+                db=db,
+                clerk_id=clerk_id,
+                session_id=payload.session_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — non-critical, the quiz result must still go through
+            logger.error("Analytics update failed (non-critical): %s", exc)
 
     return SubmitQuizResponse(**metrics)

@@ -45,6 +45,19 @@ class QuizSession(Base):
         DateTime(timezone=True), nullable=True, default=None
     )
 
+    # Set when this session was created by "Restart Quiz" (see
+    # quiz_service.create_retake_session) rather than a fresh /quiz/generate
+    # call. The user has already seen the correct answers by the time they
+    # retake, so a retake's results must never feed analytics or adaptive
+    # difficulty — every query in analytics/queries.py and analytics_service.py
+    # filters is_retake alongside deleted_at, and difficulty_service's mastery
+    # updates are skipped entirely for retake submissions. It's still graded
+    # and persisted normally otherwise, so the user sees their retake score.
+    is_retake: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    retake_of_session_id: Mapped[int | None] = mapped_column(
+        ForeignKey("quiz_sessions.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+
     user: Mapped[User] = relationship("User", back_populates="quiz_sessions")
     attempts: Mapped[list[QuestionAttempt]] = relationship(
         "QuestionAttempt", back_populates="session", cascade="all, delete-orphan"

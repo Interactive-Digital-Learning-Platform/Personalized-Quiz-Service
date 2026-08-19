@@ -24,8 +24,8 @@ if database_url_obj.drivername.startswith("sqlite"):
     engine_kwargs["connect_args"] = {"check_same_thread": False}
 else:
     engine_kwargs["connect_args"] = {"ssl": True}
-    engine_kwargs["pool_size"] = 5
-    engine_kwargs["max_overflow"] = 10
+    engine_kwargs["pool_size"] = settings.DB_POOL_SIZE
+    engine_kwargs["max_overflow"] = settings.DB_MAX_OVERFLOW
 
 engine: AsyncEngine = create_async_engine(database_url, **engine_kwargs)
 

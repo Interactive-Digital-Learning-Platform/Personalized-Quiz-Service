@@ -28,7 +28,9 @@ _groq_client = AsyncGroq(api_key=settings.GROQ_API_KEY)
 _TRANSIENT_GROQ_ERRORS = (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError)
 
 
-async def _create_chat_completion_with_retry(*, messages: Iterable[ChatCompletionMessageParam]):
+async def _create_chat_completion_with_retry(
+    *, messages: Iterable[ChatCompletionMessageParam], max_tokens: int = 4096,
+):
     # Retries transient Groq errors with backoff + jitter. Without this, one
     # rate-limit blip used to fail the whole quiz generation and fall back to
     # the (often near-empty) DB cache far more often than it should have.
@@ -39,7 +41,7 @@ async def _create_chat_completion_with_retry(*, messages: Iterable[ChatCompletio
                 model=settings.GROQ_MODEL,
                 messages=messages,
                 temperature=0.95,
-                max_tokens=4096,
+                max_tokens=max_tokens,
                 response_format={"type": "json_object"},
             )
         except _TRANSIENT_GROQ_ERRORS as exc:
@@ -298,6 +300,201 @@ QUALITY RULES:
         )
 
     logger.info("Groq generated %d valid questions (requested %d)", len(validated), question_count)
+    return validated
+
+
+async def generate_shuffle_quiz_questions(
+    grade: int,
+    subject_plan: list[tuple[str, str, int]],
+    avoid_lessons_by_subject: dict[str, list[str]] | None = None,
+    telemetry: dict | None = None,
+) -> list[dict]:
+    """Shuffle Mode's entire AI phase in ONE Groq call: asks for every
+    subject's questions at once, each at that subject's own current
+    adaptive difficulty, instead of one call (or several retries) per
+    subject. `subject_plan` is a list of (subject, difficulty, count) --
+    each subject's difficulty is decided by the caller from the student's
+    real mastery data (see difficulty_service), never left for the model
+    to pick.
+
+    Returns a flat list of validated question dicts, each tagged with which
+    subject it belongs to: {"subject", "lesson", "difficulty", "question",
+    "options", "correct_answer", "explanation"}. `difficulty` is always
+    copied from `subject_plan`, never trusted from the AI's own response.
+    A question whose "subject" doesn't match one of the requested subjects
+    is dropped rather than guessed at.
+
+    Raises HTTPException(502) on any Groq/parsing failure, same as
+    generate_questions() -- the caller falls back to the DB cache.
+    """
+    avoid_lessons_by_subject = avoid_lessons_by_subject or {}
+    total_count = sum(count for _, _, count in subject_plan)
+
+    system_prompt = """You are an expert educational content creator for Sri Lankan school students.
+Your task is to generate UNIQUE, DIVERSE multiple-choice quiz questions covering SEVERAL subjects in one batch.
+
+CRITICAL: You MUST respond with ONLY a valid JSON object in exactly this structure:
+{
+  "questions": [
+    {
+      "subject": "Exactly one of the requested subject names",
+      "lesson": "The specific lesson/topic this question covers",
+      "question": "The full question text here?",
+      "options": ["Option A", "Option B", "Option C", "Option D"],
+      "correct_answer": "Option A",
+      "explanation": "Brief explanation of why this is correct."
+    }
+  ]
+}
+
+UNIQUENESS RULES (highest priority):
+- Every question MUST test a DIFFERENT specific fact, concept, or skill.
+- DO NOT repeat or rephrase any other question in this same batch.
+- DO NOT cluster questions around one narrow sub-topic within a subject.
+
+VARIETY REQUIREMENTS — mix ALL of the following styles across the set:
+- Factual recall, application, cause-and-effect, comparison, scenario/real-world,
+  negation (sparingly), and numerical/formula-based (for maths/science where appropriate).
+
+QUALITY RULES:
+- Each question must have EXACTLY 4 options.
+- correct_answer must be EXACTLY one of the 4 options (copy it verbatim).
+- All 4 options must be plausible — avoid obviously wrong distractors.
+- Questions must be appropriate for the specified grade level.
+- "subject" MUST be copied verbatim from the requested subject list below — never invent or rename one.
+- "lesson" must be a real, specific topic name from that subject's standard syllabus — never the
+  subject name itself and never generic ("General", "Miscellaneous", etc).
+- Do NOT include numbering in the question text.
+- Do NOT output anything outside the JSON object.
+"""
+
+    seed_context = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+    plan_lines = []
+    for subject, difficulty, count in subject_plan:
+        avoid = avoid_lessons_by_subject.get(subject) or []
+        line = f"- {subject}: {count} questions at {difficulty} difficulty"
+        if avoid:
+            line += f" (this student was recently quizzed on: {', '.join(avoid[:6])} — prefer other lessons where possible)"
+        plan_lines.append(line)
+
+    user_prompt = (
+        f"[Request ID: {seed_context}]\n\n"
+        f"Generate a batch of {total_count} UNIQUE multiple-choice questions for Grade {grade} "
+        f"Sri Lankan students, split EXACTLY as follows across subjects:\n"
+        + "\n".join(plan_lines) +
+        f"\n\nRequirements:\n"
+        f"- Return EXACTLY {total_count} questions total, matching the per-subject counts above.\n"
+        f"- Within each subject, EACH question must come from a DIFFERENT lesson/topic — spread "
+        f"coverage across the subject's syllabus rather than clustering on one lesson.\n"
+        f"- Use a variety of question styles across the whole batch.\n\n"
+        f"Return exactly {total_count} questions in the required JSON format."
+    )
+
+    # Scales with the batch size instead of the fixed 4096 single-subject
+    # calls use — a multi-subject shuffle batch can ask for meaningfully
+    # more completion tokens than one subject alone ever would.
+    max_tokens = min(8192, max(4096, total_count * 220))
+
+    try:
+        logger.info(
+            "Calling Groq API (shuffle batch): model=%s, subjects=%d, total_count=%d",
+            settings.GROQ_MODEL, len(subject_plan), total_count,
+        )
+        response = await _create_chat_completion_with_retry(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=max_tokens,
+        )
+    except GroqError as exc:
+        logger.error("Groq API error during shuffle question generation: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"AI service error: {exc}",
+        )
+
+    raw_content = response.choices[0].message.content or ""
+
+    try:
+        data = json.loads(raw_content)
+    except json.JSONDecodeError as exc:
+        logger.error("Groq returned non-JSON content: %s", raw_content[:500])
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"AI returned malformed JSON: {exc}",
+        )
+
+    raw_questions: list = data.get("questions", [])
+    if not isinstance(raw_questions, list) or len(raw_questions) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="AI returned an empty question list. Please try again.",
+        )
+
+    difficulty_by_subject = {subject: difficulty for subject, difficulty, _ in subject_plan}
+    subject_by_lower = {subject.lower(): subject for subject, _, _ in subject_plan}
+
+    # A little overshoot is tolerated (the model sometimes returns a few
+    # extra) -- the caller caps each subject at its own requested count.
+    cap = total_count * 2
+
+    validated: list[dict] = []
+    for i, q in enumerate(raw_questions[:cap]):
+        if not isinstance(q, dict):
+            continue
+
+        raw_subject = str(q.get("subject", "")).strip()
+        subject = subject_by_lower.get(raw_subject.lower())
+        if subject is None:
+            logger.warning("Skipping shuffle question at index %d: unrecognized subject %r", i, raw_subject)
+            continue
+
+        question_text = str(q.get("question", "")).strip()
+        options = q.get("options", [])
+        correct = str(q.get("correct_answer", "")).strip()
+        explanation = str(q.get("explanation", "")).strip()
+        question_lesson = str(q.get("lesson", "")).strip() or subject
+
+        if not question_text or not isinstance(options, list) or len(options) != 4:
+            logger.warning(
+                "Skipping malformed shuffle question at index %d: expected 4 options, got %d",
+                i, len(options) if isinstance(options, list) else 0,
+            )
+            continue
+
+        if correct not in options:
+            match = next((o for o in options if o.strip().lower() == correct.strip().lower()), None)
+            if match is None:
+                logger.warning(
+                    "Skipping shuffle question at index %d: correct_answer %r not found in options %r",
+                    i, correct, options,
+                )
+                continue
+            correct = match
+
+        validated.append({
+            "subject": subject,
+            "lesson": question_lesson,
+            "difficulty": difficulty_by_subject[subject],
+            "question": question_text,
+            "options": options,
+            "correct_answer": correct,
+            "explanation": explanation,
+        })
+
+    if telemetry is not None:
+        invalid_count = len(raw_questions[:cap]) - len(validated)
+        telemetry["invalid_question_count"] = telemetry.get("invalid_question_count", 0) + invalid_count
+
+    if not validated:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="AI returned no valid questions after validation.",
+        )
+
+    logger.info("Groq generated %d valid shuffle questions (requested %d)", len(validated), total_count)
     return validated
 
 

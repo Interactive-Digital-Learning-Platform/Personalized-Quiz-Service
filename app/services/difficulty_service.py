@@ -40,6 +40,7 @@ _MasteryRow = LessonMastery | SubjectMastery
 class GradedAnswer:
     # Built once by quiz_service.submit_quiz() and passed to both update
     # functions so neither has to re-derive correctness or re-fetch Question rows.
+    subject: str
     lesson: str
     difficulty: str
     correct: bool | None

@@ -6,6 +6,15 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
 
     DATABASE_URL: str
+    # Per-process Postgres connection pool (ignored for the SQLite dev/test
+    # fallback -- see database.py).
+    # IMPORTANT: multiply (DB_POOL_SIZE + DB_MAX_OVERFLOW) by the number of
+    # uvicorn workers/processes to get the real total connection count this
+    # service can open against the database -- keep that under whatever
+    # ceiling your DB provider actually enforces (e.g. Neon's plan-level
+    # connection limit).
+    DB_POOL_SIZE: int = 10
+    DB_MAX_OVERFLOW: int = 20
 
     GROQ_API_KEY: str
     GROQ_MODEL: str = "llama3-70b-8192"

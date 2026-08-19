@@ -64,7 +64,7 @@ async def _submit(
             selected_answer="A" if is_correct else "B", correct=is_correct, response_time=5.0,
         ))
         graded_answers.append(difficulty_service.GradedAnswer(
-            lesson=lesson, difficulty=difficulty, correct=is_correct,
+            subject=subject, lesson=lesson, difficulty=difficulty, correct=is_correct,
             response_time=5.0, fingerprint=question.question_fingerprint,
         ))
 
@@ -218,7 +218,7 @@ async def test_subject_mastery_falls_back_to_direct_evidence_without_lesson_data
     db_session.add(session)
     await db_session.flush()
     graded_answers = [
-        difficulty_service.GradedAnswer(lesson="unknown", difficulty="easy", correct=True, response_time=5.0, fingerprint=f"fp{i}")
+        difficulty_service.GradedAnswer(subject="Mathematics", lesson="unknown", difficulty="easy", correct=True, response_time=5.0, fingerprint=f"fp{i}")
         for i in range(5)
     ]
     db_session.add(QuizCompletion(

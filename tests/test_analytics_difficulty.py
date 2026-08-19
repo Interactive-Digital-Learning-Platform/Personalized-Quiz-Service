@@ -70,7 +70,7 @@ async def _submit_quiz(
             selected_answer="A" if is_correct else "B", correct=is_correct, response_time=5.0,
         ))
         graded_answers.append(difficulty_service.GradedAnswer(
-            lesson=lesson, difficulty=difficulty, correct=is_correct,
+            subject=subject, lesson=lesson, difficulty=difficulty, correct=is_correct,
             response_time=5.0, fingerprint=question.question_fingerprint,
         ))
 

@@ -1,12 +1,16 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class GenerateQuizRequest(BaseModel):
     grade: int = Field(10, ge=1, le=13, description="School grade level (1–13)")
-    subject: str = Field(..., min_length=1, max_length=100)
+    subject: str | None = Field(
+        default=None,
+        max_length=100,
+        description="Required unless shuffle=True, in which case subjects (plural) is used instead.",
+    )
     lesson: str | None = Field(
         default=None,
         max_length=255,
@@ -34,6 +38,19 @@ class GenerateQuizRequest(BaseModel):
         default=False,
         description="Skip AI generation and serve directly from the DB question pool (user-initiated fallback after AI failure)",
     )
+    shuffle: bool = Field(
+        default=False,
+        description=(
+            "Shuffle/remix mode: generate one quiz spanning multiple subjects "
+            "(see `subjects`) instead of a single subject. Bypasses lesson/"
+            "difficulty overrides — each subject uses its own current adaptive "
+            "difficulty automatically."
+        ),
+    )
+    subjects: list[str] | None = Field(
+        default=None,
+        description="Subjects to shuffle across. Required (non-empty) when shuffle=True; ignored otherwise.",
+    )
 
     @field_validator("difficulty")
     @classmethod
@@ -44,6 +61,15 @@ class GenerateQuizRequest(BaseModel):
         if v.lower() not in allowed:
             raise ValueError(f"difficulty must be one of {allowed}")
         return v.lower()
+
+    @model_validator(mode="after")
+    def validate_subject_fields(self) -> "GenerateQuizRequest":
+        if self.shuffle:
+            if not self.subjects:
+                raise ValueError("subjects must be a non-empty list when shuffle=True")
+        elif not self.subject:
+            raise ValueError("subject is required when shuffle is not set")
+        return self
 
 
 class QuestionOut(BaseModel):
@@ -64,6 +90,10 @@ class GenerateQuizResponse(BaseModel):
     cache_hit: bool = False
     difficulty: str
     lesson: str
+
+
+class RetakeSessionResponse(BaseModel):
+    session_id: int
 
 
 class SavedQuizResponse(BaseModel):
