@@ -10,7 +10,8 @@ from app.models.ai_generation_event import AIGenerationEvent
 logger = logging.getLogger(__name__)
 
 ERROR_CATEGORIES = (
-    "timeout", "provider_error", "invalid_json", "validation_error", "database_error", "unknown",
+    "timeout", "provider_error", "invalid_json", "validation_error", "database_error",
+    "rate_limited", "unknown",
 )
 
 
@@ -29,6 +30,8 @@ def categorize_generation_error(exc: BaseException) -> str:
             return "invalid_json"
         if "empty question list" in detail or "no valid questions" in detail:
             return "validation_error"
+        if "rate limit" in detail:
+            return "rate_limited"
         if "ai service error" in detail:
             return "provider_error"
         return "provider_error"

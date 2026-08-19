@@ -30,6 +30,14 @@ from app.services.analytics.types import (
 # _get_recent_lessons() and the SubjectMastery/LessonMastery tables, which
 # keep reading through deleted sessions since those drive quiz generation
 # and must never lose history just because the user tidied up their list.
+#
+# Every query also filters QuizSession.is_retake IS FALSE, for a different
+# reason: a retake ("Restart Quiz") replays a session whose correct answers
+# the user has already seen, so its results would inflate this dashboard
+# rather than reflect real performance. Retake submissions still skip
+# adaptive-difficulty updates entirely (see quiz_service.submit_quiz), so
+# unlike deleted_at there's no separate "generation-critical" path that
+# needs to see them.
 
 UNKNOWN_TOPIC = "Unknown Topic"
 
@@ -73,7 +81,7 @@ async def fetch_subject_mastery_by_subject(db: AsyncSession, user_id: int) -> di
 async def fetch_session_completion_stats(db: AsyncSession, user_id: int) -> SessionCompletionStats:
     total_sessions: int = int(
         (await db.execute(
-            select(func.count(QuizSession.id)).where(QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None))
+            select(func.count(QuizSession.id)).where(QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None), QuizSession.is_retake.is_(False))
         )).scalar_one() or 0
     )
 
@@ -84,7 +92,7 @@ async def fetch_session_completion_stats(db: AsyncSession, user_id: int) -> Sess
             func.avg(QuizCompletion.total_time).label("avg_duration"),
         )
         .join(QuizSession, QuizSession.id == QuizCompletion.session_id)
-        .where(QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None))
+        .where(QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None), QuizSession.is_retake.is_(False))
     )
     completion_row = (await db.execute(completion_stmt)).one()
     # Postgres can return SUM()/CASE aggregates as Decimal rather than plain
@@ -96,7 +104,7 @@ async def fetch_session_completion_stats(db: AsyncSession, user_id: int) -> Sess
 
     average_questions_per_session = round(
         float((await db.execute(
-            select(func.avg(QuizSession.question_count)).where(QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None))
+            select(func.avg(QuizSession.question_count)).where(QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None), QuizSession.is_retake.is_(False))
         )).scalar_one() or 0.0),
         2,
     )
@@ -123,7 +131,7 @@ async def fetch_session_completion_stats(db: AsyncSession, user_id: int) -> Sess
         .outerjoin(QuizCompletion, QuizCompletion.session_id == QuizSession.id)
         .outerjoin(last_snapshot_subq, last_snapshot_subq.c.session_id == QuizSession.id)
         .where(
-            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None),
+            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None), QuizSession.is_retake.is_(False),
             QuizCompletion.id.is_(None),
         )
     )
@@ -170,7 +178,7 @@ async def fetch_graded_totals(db: AsyncSession, user_id: int) -> GradedTotals:
         )
         .join(QuizSession, QuizSession.id == QuestionAttempt.session_id)
         .where(
-            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None),
+            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None), QuizSession.is_retake.is_(False),
             QuestionAttempt.correct.is_not(None),
         )
     )
@@ -194,7 +202,7 @@ async def fetch_graded_totals(db: AsyncSession, user_id: int) -> GradedTotals:
         select(func.coalesce(func.sum(case((missing_expr > 0, missing_expr), else_=0)), 0))
         .select_from(QuizSession)
         .outerjoin(attempt_counts_subq, attempt_counts_subq.c.session_id == QuizSession.id)
-        .where(QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None))
+        .where(QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None), QuizSession.is_retake.is_(False))
     )
     total_unanswered_questions = int((await db.execute(unanswered_stmt)).scalar_one() or 0)
 
@@ -236,7 +244,7 @@ async def fetch_topic_rows(db: AsyncSession, user_id: int) -> list[TopicRow]:
         .join(Question, Question.id == QuestionAttempt.question_id)
         .outerjoin(QuizCompletion, QuizCompletion.session_id == QuizSession.id)
         .where(
-            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None),
+            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None), QuizSession.is_retake.is_(False),
             QuestionAttempt.correct.is_not(None),
         )
         .group_by(Question.subject, topic_expr)
@@ -270,7 +278,7 @@ async def fetch_response_time_rows(db: AsyncSession, user_id: int) -> list[Respo
         .join(QuizSession, QuizSession.id == QuestionAttempt.session_id)
         .join(Question, Question.id == QuestionAttempt.question_id)
         .where(
-            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None),
+            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None), QuizSession.is_retake.is_(False),
             QuestionAttempt.correct.is_not(None),
             QuestionAttempt.response_time.is_not(None),
             QuestionAttempt.response_time >= 0,
@@ -292,7 +300,7 @@ async def fetch_session_completed_at(db: AsyncSession, user_id: int) -> dict[int
         )
         .select_from(QuizSession)
         .join(QuizCompletion, QuizCompletion.session_id == QuizSession.id)
-        .where(QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None))
+        .where(QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None), QuizSession.is_retake.is_(False))
     )
     rows = (await db.execute(stmt)).all()
     return {row.session_id: as_utc(row.completed_at) for row in rows}
@@ -312,7 +320,7 @@ async def fetch_trend_attempt_rows(db: AsyncSession, user_id: int) -> list[Trend
         .join(Question, Question.id == QuestionAttempt.question_id)
         .join(QuizCompletion, QuizCompletion.session_id == QuizSession.id)
         .where(
-            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None),
+            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None), QuizSession.is_retake.is_(False),
             QuestionAttempt.correct.is_not(None),
         )
     )
@@ -341,7 +349,7 @@ async def fetch_repeated_attempt_rows(db: AsyncSession, user_id: int) -> list[Re
         .join(QuizSession, QuizSession.id == QuestionAttempt.session_id)
         .join(Question, Question.id == QuestionAttempt.question_id)
         .where(
-            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None),
+            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None), QuizSession.is_retake.is_(False),
             QuestionAttempt.correct.is_not(None),
         )
         .order_by(QuizSession.created_at.asc(), QuestionAttempt.id.asc())
@@ -371,7 +379,7 @@ async def fetch_difficulty_attempt_rows(db: AsyncSession, user_id: int) -> list[
         .join(QuizSession, QuizSession.id == QuestionAttempt.session_id)
         .join(Question, Question.id == QuestionAttempt.question_id)
         .where(
-            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None),
+            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None), QuizSession.is_retake.is_(False),
             QuestionAttempt.correct.is_not(None),
         )
         .group_by(QuizSession.subject, Question.difficulty)
@@ -399,7 +407,7 @@ async def fetch_difficulty_session_rows(db: AsyncSession, user_id: int) -> list[
         .join(Question, Question.id == QuestionAttempt.question_id)
         .join(QuizCompletion, QuizCompletion.session_id == QuizSession.id)
         .where(
-            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None),
+            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None), QuizSession.is_retake.is_(False),
             QuestionAttempt.correct.is_not(None),
         )
         .group_by(QuizSession.subject, Question.difficulty)
@@ -429,7 +437,7 @@ async def fetch_topic_difficulty_rows(db: AsyncSession, user_id: int) -> list[To
         .join(QuizSession, QuizSession.id == QuestionAttempt.session_id)
         .join(Question, Question.id == QuestionAttempt.question_id)
         .where(
-            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None),
+            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None), QuizSession.is_retake.is_(False),
             QuestionAttempt.correct.is_not(None),
         )
         .group_by(QuizSession.subject, topic_expr, Question.difficulty)
@@ -465,7 +473,7 @@ async def fetch_growth_session_rows(
         .select_from(QuizSession)
         .outerjoin(QuizCompletion, QuizCompletion.session_id == QuizSession.id)
         .outerjoin(last_snapshot_subq, last_snapshot_subq.c.session_id == QuizSession.id)
-        .where(QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None), QuizSession.created_at >= window_start)
+        .where(QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None), QuizSession.is_retake.is_(False), QuizSession.created_at >= window_start)
     )
     rows = (await db.execute(stmt)).all()
     return [
@@ -496,7 +504,7 @@ async def fetch_growth_attempt_rows(
         .join(QuizSession, QuizSession.id == QuestionAttempt.session_id)
         .join(Question, Question.id == QuestionAttempt.question_id)
         .where(
-            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None),
+            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None), QuizSession.is_retake.is_(False),
             QuestionAttempt.correct.is_not(None),
             QuizSession.created_at >= window_start,
         )
