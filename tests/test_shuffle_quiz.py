@@ -28,12 +28,29 @@ from sqlalchemy import select
 
 from app.models.lesson_mastery import LessonMastery
 from app.models.question import Question
-from app.models.quiz_session import QuizSession
+from app.models.quiz_session import QuestionAttempt, QuizSession
 from app.models.subject_mastery import SubjectMastery
 from app.schemas.quiz import GenerateQuizRequest
 from app.services import groq_service
 from app.services.quiz_service import generate_quiz, get_or_create_user
 from tests.conftest import TEST_CLERK_ID
+
+
+async def _mark_questions_already_seen(db, user_id: int, questions: list[Question]) -> None:
+    """Generation now reads the (subject, difficulty) pool first, excluding
+    whatever this user already has a QuestionAttempt for -- tests that want
+    to exercise the AI phase (and the blind fallback tiers behind it)
+    despite cached rows already existing must mark those rows as already
+    seen by this test user, or the pool alone would silently satisfy the
+    request before AI ever gets a chance to run."""
+    session = QuizSession(
+        user_id=user_id, subject="Placeholder", lesson="Placeholder", difficulty="easy", question_count=len(questions),
+    )
+    db.add(session)
+    await db.flush()
+    for question in questions:
+        db.add(QuestionAttempt(session_id=session.id, question_id=question.id, selected_answer="A", correct=True))
+    await db.commit()
 
 
 def _fake_chat_completion(questions: list[dict]):
@@ -106,6 +123,53 @@ async def test_generate_shuffle_quiz_questions_drops_unrecognized_subject():
 
     assert len(result) == 1
     assert result[0]["subject"] == "Mathematics"
+
+
+@pytest.mark.asyncio
+async def test_generate_shuffle_quiz_questions_includes_existing_questions_in_prompt():
+    """existing_questions_by_subject must reach the actual Groq prompt as a
+    per-subject "avoid these" block -- this is what stops Shuffle Mode from
+    regenerating near-duplicates of questions already cached in the DB."""
+    mock_create = AsyncMock(
+        return_value=_fake_chat_completion(
+            _canned_shuffle_questions([("Mathematics", 1, "Math"), ("Science", 1, "Sci")])
+        )
+    )
+    with patch.object(groq_service._groq_client.chat.completions, "create", mock_create):
+        await groq_service.generate_shuffle_quiz_questions(
+            grade=10,
+            subject_plan=[("Mathematics", "easy", 1), ("Science", "medium", 1)],
+            existing_questions_by_subject={
+                "Mathematics": ["What is 2 + 2?"],
+                "Science": ["What is H2O?"],
+            },
+        )
+
+    sent_messages = mock_create.call_args.kwargs["messages"]
+    user_prompt = sent_messages[1]["content"]
+    assert "What is 2 + 2?" in user_prompt
+    assert "What is H2O?" in user_prompt
+    assert "EXISTING QUESTIONS TO AVOID for Mathematics" in user_prompt
+    assert "EXISTING QUESTIONS TO AVOID for Science" in user_prompt
+
+
+@pytest.mark.asyncio
+async def test_generate_shuffle_quiz_questions_omits_exclusion_block_when_none_exist():
+    """A subject with no cached questions yet shouldn't get an empty/noisy
+    exclusion block in the prompt."""
+    mock_create = AsyncMock(
+        return_value=_fake_chat_completion(_canned_shuffle_questions([("Mathematics", 1, "Math")]))
+    )
+    with patch.object(groq_service._groq_client.chat.completions, "create", mock_create):
+        await groq_service.generate_shuffle_quiz_questions(
+            grade=10,
+            subject_plan=[("Mathematics", "easy", 1)],
+            existing_questions_by_subject={"Mathematics": []},
+        )
+
+    sent_messages = mock_create.call_args.kwargs["messages"]
+    user_prompt = sent_messages[1]["content"]
+    assert "EXISTING QUESTIONS TO AVOID" not in user_prompt
 
 
 # ── quiz_service.generate_quiz() shuffle integration tests ───────────────
@@ -257,12 +321,18 @@ async def test_shuffle_global_db_fallback_fills_deficit_from_a_different_subject
     # No cached Mathematics question at all -- its own subject-fallback tier
     # will come up empty. A cached Science question the AI phase won't
     # touch (AI always creates fresh rows) is there for the GLOBAL fallback
-    # to find instead.
-    db_session.add(Question(
+    # to find instead. Marked as already seen by this test user so the new
+    # pool-first read (which excludes a user's own attempt history) doesn't
+    # consume it before the AI phase runs -- the point of this test is the
+    # GLOBAL FALLBACK finding it, not the pool.
+    user = await get_or_create_user(db_session, TEST_CLERK_ID)
+    science_question = Question(
         question="Cached Science fallback?", options=["A", "B", "C", "D"], correct_answer="A",
         subject="Science", lesson="Biology", difficulty="easy",
-    ))
-    await db_session.commit()
+    )
+    db_session.add(science_question)
+    await db_session.flush()
+    await _mark_questions_already_seen(db_session, user.id, [science_question])
 
     # The single combined call covers Science and History but not
     # Mathematics -- as if the model just didn't produce one for it.
@@ -301,15 +371,23 @@ async def test_shuffle_falls_back_to_db_entirely_when_the_ai_call_fails_outright
     full count becomes a DB-fallback deficit instead of failing the
     request -- as long as cached questions exist for those subjects.
     """
-    db_session.add(Question(
+    # Marked as already seen by this test user so the new pool-first read
+    # doesn't consume them before the AI phase even runs -- the point of
+    # this test is that an outright AI failure still recovers via the DB
+    # fallback tiers, not the pool.
+    user = await get_or_create_user(db_session, TEST_CLERK_ID)
+    math_question = Question(
         question="Cached Math fallback?", options=["A", "B", "C", "D"], correct_answer="A",
         subject="Mathematics", lesson="Arithmetic", difficulty="easy",
-    ))
-    db_session.add(Question(
+    )
+    science_question = Question(
         question="Cached Science fallback?", options=["A", "B", "C", "D"], correct_answer="A",
         subject="Science", lesson="Biology", difficulty="easy",
-    ))
-    await db_session.commit()
+    )
+    db_session.add(math_question)
+    db_session.add(science_question)
+    await db_session.flush()
+    await _mark_questions_already_seen(db_session, user.id, [math_question, science_question])
 
     mock_create = AsyncMock(side_effect=_bad_request())
     payload = GenerateQuizRequest(shuffle=True, subjects=["Mathematics", "Science"], question_count=2)

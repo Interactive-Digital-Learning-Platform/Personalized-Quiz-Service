@@ -26,6 +26,18 @@ class Settings(BaseSettings):
     # multiplying calls per tier and risking 429s on a single user action).
     GROQ_MAX_GENERATION_CALLS_PER_REQUEST: int = 4
 
+    # Question pool: quiz generation reads pre-generated questions for a
+    # (subject, difficulty) bucket first and only calls Groq synchronously
+    # for whatever the pool doesn't cover (see
+    # quiz_service._fetch_pool_questions / _maybe_replenish_pool). A bucket
+    # below POOL_MIN_SIZE triggers a fire-and-forget background top-up back
+    # up to POOL_TARGET_SIZE, capped at POOL_TOPUP_MAX_BATCH questions per
+    # Groq call (mirrors GROQ_MAX_GENERATION_CALLS_PER_REQUEST's per-call
+    # sizing elsewhere).
+    POOL_MIN_SIZE: int = 20
+    POOL_TARGET_SIZE: int = 60
+    POOL_TOPUP_MAX_BATCH: int = 20
+
     CLERK_JWKS_URL: str
     CLERK_ISSUER: str
     CLERK_AUDIENCE: str | None = None

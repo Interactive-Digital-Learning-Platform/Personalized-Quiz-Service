@@ -307,6 +307,7 @@ async def generate_shuffle_quiz_questions(
     grade: int,
     subject_plan: list[tuple[str, str, int]],
     avoid_lessons_by_subject: dict[str, list[str]] | None = None,
+    existing_questions_by_subject: dict[str, list[str]] | None = None,
     telemetry: dict | None = None,
 ) -> list[dict]:
     """Shuffle Mode's entire AI phase in ONE Groq call: asks for every
@@ -315,7 +316,11 @@ async def generate_shuffle_quiz_questions(
     subject. `subject_plan` is a list of (subject, difficulty, count) --
     each subject's difficulty is decided by the caller from the student's
     real mastery data (see difficulty_service), never left for the model
-    to pick.
+    to pick. `existing_questions_by_subject` is that subject's already-
+    cached question texts (same "avoid these" mechanism generate_questions()
+    uses for normal quizzes) -- without it, Groq has no way to know a
+    question it's about to write already exists in the DB, which is why
+    Shuffle Mode kept resurfacing near-identical questions before this.
 
     Returns a flat list of validated question dicts, each tagged with which
     subject it belongs to: {"subject", "lesson", "difficulty", "question",
@@ -328,6 +333,7 @@ async def generate_shuffle_quiz_questions(
     generate_questions() -- the caller falls back to the DB cache.
     """
     avoid_lessons_by_subject = avoid_lessons_by_subject or {}
+    existing_questions_by_subject = existing_questions_by_subject or {}
     total_count = sum(count for _, _, count in subject_plan)
 
     system_prompt = """You are an expert educational content creator for Sri Lankan school students.
@@ -351,6 +357,8 @@ UNIQUENESS RULES (highest priority):
 - Every question MUST test a DIFFERENT specific fact, concept, or skill.
 - DO NOT repeat or rephrase any other question in this same batch.
 - DO NOT cluster questions around one narrow sub-topic within a subject.
+- Where a subject lists "EXISTING QUESTIONS TO AVOID", none of your new questions for that
+  subject may repeat or closely rephrase any of them.
 
 VARIETY REQUIREMENTS — mix ALL of the following styles across the set:
 - Factual recall, application, cause-and-effect, comparison, scenario/real-world,
@@ -370,12 +378,25 @@ QUALITY RULES:
 
     seed_context = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
+    # Capped lower than generate_questions()'s single-subject 60 -- a shuffle
+    # prompt already lists this block once per subject, so an uncapped list
+    # here would blow up prompt size fast on a many-subject shuffle.
+    _EXISTING_QUESTIONS_PER_SUBJECT_CAP = 20
+
     plan_lines = []
     for subject, difficulty, count in subject_plan:
         avoid = avoid_lessons_by_subject.get(subject) or []
         line = f"- {subject}: {count} questions at {difficulty} difficulty"
         if avoid:
             line += f" (this student was recently quizzed on: {', '.join(avoid[:6])} — prefer other lessons where possible)"
+
+        existing = existing_questions_by_subject.get(subject) or []
+        if existing:
+            existing_lines = "\n".join(
+                f"    - {q}" for q in existing[:_EXISTING_QUESTIONS_PER_SUBJECT_CAP]
+            )
+            line += f"\n  EXISTING QUESTIONS TO AVOID for {subject} (do NOT repeat or rephrase any of these):\n{existing_lines}"
+
         plan_lines.append(line)
 
     user_prompt = (
@@ -398,8 +419,9 @@ QUALITY RULES:
 
     try:
         logger.info(
-            "Calling Groq API (shuffle batch): model=%s, subjects=%d, total_count=%d",
+            "Calling Groq API (shuffle batch): model=%s, subjects=%d, total_count=%d, excluding=%d existing",
             settings.GROQ_MODEL, len(subject_plan), total_count,
+            sum(len(v) for v in existing_questions_by_subject.values()),
         )
         response = await _create_chat_completion_with_retry(
             messages=[

@@ -1,6 +1,6 @@
 from typing import TYPE_CHECKING
 
-from sqlalchemy import JSON, String, event
+from sqlalchemy import JSON, Index, String, event
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -12,6 +12,13 @@ if TYPE_CHECKING:
 
 class Question(Base):
     __tablename__ = "questions"
+    __table_args__ = (
+        # The question pool is read by (subject, difficulty) on every quiz
+        # generation request (see quiz_service._fetch_pool_questions) — the
+        # single-column indexes below cover other lookups but not this
+        # combined filter efficiently.
+        Index("ix_questions_subject_difficulty", "subject", "difficulty"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
 
