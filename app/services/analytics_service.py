@@ -21,11 +21,17 @@ async def update_analytics_after_submission(
     clerk_id: str,
     session_id: int,
 ) -> None:
-    # Recomputes the rolling (user, subject) Analytics row from ALL of that
-    # user's QuestionAttempt rows in this subject (not just this session), so
-    # it reflects lifetime performance. Called after every quiz submission —
-    # and also after a session delete, to keep this row from going stale
-    # (see the DELETE /quiz/sessions/{id} route).
+    # Recomputes each real subject's rolling (user, subject) Analytics row
+    # from ALL of that user's QuestionAttempt rows in that subject (not just
+    # this session), so it reflects lifetime performance. Subjects are read
+    # from each attempted Question's own `subject` -- NOT QuizSession.subject,
+    # which collapses to "Mixed" for a Shuffle Mode session spanning several
+    # subjects -- so a Mathematics question answered during Shuffle Mode
+    # updates Mathematics' analytics, never a "Mixed" bucket. A normal,
+    # single-subject session still resolves to exactly one subject here, so
+    # this is a no-op behavior change for non-shuffle quizzes. Called after
+    # every quiz submission — and also after a session delete, to keep these
+    # rows from going stale (see the DELETE /quiz/sessions/{id} route).
     user = await get_or_create_user(db, clerk_id)
 
     session_result = await db.execute(
@@ -36,8 +42,28 @@ async def update_analytics_after_submission(
         logger.warning("update_analytics: session %d not found", session_id)
         return
 
-    subject = session.subject
+    subjects_stmt = (
+        select(Question.subject)
+        .join(QuestionAttempt, QuestionAttempt.question_id == Question.id)
+        .where(QuestionAttempt.session_id == session_id)
+        .distinct()
+    )
+    subjects = [row[0] for row in (await db.execute(subjects_stmt)).all()]
+    if not subjects:
+        # No graded attempts recorded for this session (shouldn't normally
+        # happen for a submitted quiz) -- fall back to the session's own
+        # subject so a recompute still has something to key off of.
+        subjects = [session.subject]
 
+    for subject in subjects:
+        await _recompute_subject_analytics(db, user_id=user.id, subject=subject, session_id=session_id)
+
+    await db.commit()
+
+
+async def _recompute_subject_analytics(
+    db: AsyncSession, *, user_id: int, subject: str, session_id: int,
+) -> None:
     agg_stmt = (
         select(
             func.count(QuestionAttempt.id).label("total"),
@@ -46,10 +72,12 @@ async def update_analytics_after_submission(
             ).label("correct_sum"),
             func.avg(valid_response_time_case()).label("avg_time"),
         )
+        .select_from(QuestionAttempt)
         .join(QuizSession, QuizSession.id == QuestionAttempt.session_id)
+        .join(Question, Question.id == QuestionAttempt.question_id)
         .where(
-            QuizSession.user_id == user.id,
-            QuizSession.subject == subject,
+            QuizSession.user_id == user_id,
+            Question.subject == subject,
             QuizSession.deleted_at.is_(None),
             QuizSession.is_retake.is_(False),
             QuestionAttempt.correct.is_not(None),
@@ -65,9 +93,11 @@ async def update_analytics_after_submission(
 
     wrong_stmt = (
         select(QuestionAttempt.question_id)
+        .join(Question, Question.id == QuestionAttempt.question_id)
         .where(
             QuestionAttempt.session_id == session_id,
-            QuestionAttempt.correct == False, 
+            Question.subject == subject,
+            QuestionAttempt.correct == False,
         )
     )
     wrong_result = await db.execute(wrong_stmt)
@@ -82,7 +112,7 @@ async def update_analytics_after_submission(
     weak_topic = identify_weak_topic(question_topics, wrong_ids)
 
     existing_stmt = select(Analytics).where(
-        Analytics.user_id == user.id,
+        Analytics.user_id == user_id,
         Analytics.subject == subject,
     )
     existing_result = await db.execute(existing_stmt)
@@ -95,8 +125,7 @@ async def update_analytics_after_submission(
         # a stale "0% accuracy" card for a subject with no sessions left.
         if analytics_row:
             await db.delete(analytics_row)
-            logger.info("Removed analytics for user=%d, subject=%s: no sessions remain", user.id, subject)
-        await db.commit()
+            logger.info("Removed analytics for user=%d, subject=%s: no sessions remain", user_id, subject)
         return
 
     if analytics_row:
@@ -105,11 +134,11 @@ async def update_analytics_after_submission(
         analytics_row.weak_topic = weak_topic
         logger.info(
             "Updated analytics for user=%d, subject=%s: accuracy=%.1f%%",
-            user.id, subject, accuracy,
+            user_id, subject, accuracy,
         )
     else:
         analytics_row = Analytics(
-            user_id=user.id,
+            user_id=user_id,
             subject=subject,
             accuracy=round(accuracy, 2),
             avg_response_time=round(avg_time, 3),
@@ -118,10 +147,8 @@ async def update_analytics_after_submission(
         db.add(analytics_row)
         logger.info(
             "Created analytics for user=%d, subject=%s: accuracy=%.1f%%",
-            user.id, subject, accuracy,
+            user_id, subject, accuracy,
         )
-
-    await db.commit()
 
 
 async def get_user_analytics(db: AsyncSession, clerk_id: str) -> dict:

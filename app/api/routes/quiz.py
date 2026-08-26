@@ -15,6 +15,8 @@ from app.schemas.quiz import (
     GenerateQuizRequest,
     GenerateQuizResponse,
     QuestionOut,
+    QuizQuoteRequest,
+    QuizQuoteResponse,
     QuizSessionSummary,
     RetakeSessionResponse,
     SavedQuizResponse,
@@ -24,6 +26,7 @@ from app.schemas.quiz import (
     SubmitQuizResponse,
 )
 from app.services.analytics_service import update_analytics_after_submission
+from app.services.groq_service import generate_motivational_quote
 from app.services.quiz_service import (
     create_retake_session,
     generate_quiz,
@@ -433,3 +436,37 @@ async def submit_timeout_quiz_endpoint(
             logger.error("Analytics update failed (non-critical): %s", exc)
 
     return SubmitQuizResponse(**metrics)
+
+
+@router.post(
+    "/motivational-quote",
+    response_model=QuizQuoteResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get an AI-generated motivational quote for a quiz result",
+    description=(
+        "Generates a short, original motivational quote reacting to the given "
+        "quiz result (subject, difficulty, accuracy). Purely cosmetic for the "
+        "results screen — unlike /analytics/feedback, it doesn't touch the "
+        "user's historical analytics, so it's a single small Groq call."
+    ),
+)
+async def get_motivational_quote(
+    payload: QuizQuoteRequest,
+    current_user: dict = Depends(get_current_user),
+) -> QuizQuoteResponse:
+    clerk_id: str = current_user.get("sub", "")
+    if not clerk_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token is missing the 'sub' (user ID) claim.",
+        )
+
+    quote = await generate_motivational_quote(
+        subject=payload.subject,
+        difficulty=payload.difficulty,
+        accuracy=payload.accuracy,
+        correct_count=payload.correct_count,
+        total_questions=payload.total_questions,
+        is_timeout=payload.is_timeout,
+    )
+    return QuizQuoteResponse(quote=quote)

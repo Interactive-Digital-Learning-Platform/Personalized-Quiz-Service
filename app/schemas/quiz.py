@@ -163,6 +163,19 @@ class SubmitQuizRequest(BaseModel):
     repeated_question_ids: list[int] = Field(default_factory=list)
 
 
+class QuizQuoteRequest(BaseModel):
+    subject: str = Field(..., max_length=100)
+    difficulty: str
+    accuracy: float = Field(..., ge=0.0, le=100.0)
+    correct_count: int = Field(..., ge=0)
+    total_questions: int = Field(..., ge=1)
+    is_timeout: bool = False
+
+
+class QuizQuoteResponse(BaseModel):
+    quote: str
+
+
 class SubmitQuizResponse(BaseModel):
     session_id: int
     score: float

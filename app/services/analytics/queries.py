@@ -269,7 +269,7 @@ async def fetch_response_time_rows(db: AsyncSession, user_id: int) -> list[Respo
     topic_expr = _topic_expr()
     stmt = (
         select(
-            QuizSession.subject.label("subject"),
+            Question.subject.label("subject"),
             topic_expr.label("topic"),
             QuestionAttempt.correct.label("correct"),
             QuestionAttempt.response_time.label("response_time"),
@@ -311,7 +311,7 @@ async def fetch_trend_attempt_rows(db: AsyncSession, user_id: int) -> list[Trend
     stmt = (
         select(
             QuestionAttempt.session_id.label("session_id"),
-            QuizSession.subject.label("subject"),
+            Question.subject.label("subject"),
             topic_expr.label("topic"),
             QuestionAttempt.correct.label("correct"),
         )
@@ -369,7 +369,7 @@ async def fetch_difficulty_attempt_rows(db: AsyncSession, user_id: int) -> list[
     # session mixing difficulty levels is still split correctly.
     stmt = (
         select(
-            QuizSession.subject.label("subject"),
+            Question.subject.label("subject"),
             Question.difficulty.label("difficulty"),
             func.count(QuestionAttempt.id).label("total_attempted"),
             func.sum(cast(QuestionAttempt.correct, Integer)).label("total_correct"),
@@ -382,7 +382,7 @@ async def fetch_difficulty_attempt_rows(db: AsyncSession, user_id: int) -> list[
             QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None), QuizSession.is_retake.is_(False),
             QuestionAttempt.correct.is_not(None),
         )
-        .group_by(QuizSession.subject, Question.difficulty)
+        .group_by(Question.subject, Question.difficulty)
     )
     rows = (await db.execute(stmt)).all()
     return [
@@ -398,7 +398,7 @@ async def fetch_difficulty_attempt_rows(db: AsyncSession, user_id: int) -> list[
 async def fetch_difficulty_session_rows(db: AsyncSession, user_id: int) -> list[DifficultySessionRow]:
     stmt = (
         select(
-            QuizSession.subject.label("subject"),
+            Question.subject.label("subject"),
             Question.difficulty.label("difficulty"),
             func.count(func.distinct(QuizSession.id)).label("completed_sessions"),
         )
@@ -410,7 +410,7 @@ async def fetch_difficulty_session_rows(db: AsyncSession, user_id: int) -> list[
             QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None), QuizSession.is_retake.is_(False),
             QuestionAttempt.correct.is_not(None),
         )
-        .group_by(QuizSession.subject, Question.difficulty)
+        .group_by(Question.subject, Question.difficulty)
     )
     rows = (await db.execute(stmt)).all()
     return [
@@ -427,7 +427,7 @@ async def fetch_topic_difficulty_rows(db: AsyncSession, user_id: int) -> list[To
     topic_expr = _topic_expr()
     stmt = (
         select(
-            QuizSession.subject.label("subject"),
+            Question.subject.label("subject"),
             topic_expr.label("topic"),
             Question.difficulty.label("difficulty"),
             func.count(QuestionAttempt.id).label("total_attempted"),
@@ -440,7 +440,7 @@ async def fetch_topic_difficulty_rows(db: AsyncSession, user_id: int) -> list[To
             QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None), QuizSession.is_retake.is_(False),
             QuestionAttempt.correct.is_not(None),
         )
-        .group_by(QuizSession.subject, topic_expr, Question.difficulty)
+        .group_by(Question.subject, topic_expr, Question.difficulty)
     )
     rows = (await db.execute(stmt)).all()
     return [
@@ -496,7 +496,7 @@ async def fetch_growth_attempt_rows(
         select(
             QuestionAttempt.session_id.label("session_id"),
             QuestionAttempt.correct.label("correct"),
-            QuizSession.subject.label("subject"),
+            Question.subject.label("subject"),
             topic_expr.label("topic"),
             QuizSession.created_at.label("session_created_at"),
         )

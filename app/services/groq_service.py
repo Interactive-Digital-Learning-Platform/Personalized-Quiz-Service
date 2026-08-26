@@ -604,3 +604,70 @@ Keep suggestions practical and achievable for a school student.
         ),
         "generated_at": datetime.now(UTC).isoformat(),
     }
+
+
+_FALLBACK_QUOTE = "Every quiz is a step forward — keep going!"
+
+
+async def generate_motivational_quote(
+    *,
+    subject: str,
+    difficulty: str,
+    accuracy: float,
+    correct_count: int,
+    total_questions: int,
+    is_timeout: bool,
+) -> str:
+    # A single-sentence pep talk for the result of THIS quiz specifically —
+    # distinct from generate_feedback()'s motivational_note, which is based
+    # on the student's whole historical analytics profile. Deliberately a
+    # much smaller/cheaper call (short prompt, small max_tokens) since it
+    # only needs one quiz's numbers, not the full analytics payload.
+    system_prompt = """You are an encouraging study coach for school students.
+Write ONE short, original motivational quote (max 25 words) reacting to a
+student's just-finished quiz result.
+
+CRITICAL: Respond ONLY with a valid JSON object in this exact structure:
+{"quote": "The quote text here."}
+
+Rules:
+- Tone should match the result: celebratory for a strong score, encouraging
+  and non-judgemental for a weak one, and understanding (not scolding) if
+  the quiz ended by timeout.
+- Do not mention exact numbers/percentages — react qualitatively.
+- Do not use quotation marks inside the quote text itself.
+- Keep it warm, concise, and age-appropriate for a school student.
+"""
+
+    result_desc = (
+        f"Subject: {subject}\n"
+        f"Difficulty: {difficulty}\n"
+        f"Score: {correct_count}/{total_questions} correct ({accuracy:.0f}% accuracy)\n"
+        f"Ended by: {'timeout' if is_timeout else 'submission'}"
+    )
+    user_prompt = f"Here is the student's quiz result:\n{result_desc}\n\nWrite the motivational quote now."
+
+    try:
+        response = await _groq_client.chat.completions.create(
+            model=settings.GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.9,
+            max_tokens=100,
+            response_format={"type": "json_object"},
+        )
+    except GroqError as exc:
+        logger.warning("Groq API error during quote generation, using fallback: %s", exc)
+        return _FALLBACK_QUOTE
+
+    raw_content = response.choices[0].message.content or "{}"
+    try:
+        data = json.loads(raw_content)
+    except json.JSONDecodeError:
+        logger.warning("Groq quote response was non-JSON, using fallback.")
+        return _FALLBACK_QUOTE
+
+    quote = str(data.get("quote", "")).strip()
+    return quote or _FALLBACK_QUOTE

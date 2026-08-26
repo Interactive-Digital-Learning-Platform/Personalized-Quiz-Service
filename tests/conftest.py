@@ -81,7 +81,9 @@ async def db_session():
 
 @pytest_asyncio.fixture
 async def client(db_session):
-    """An httpx.AsyncClient driving the app in-process, sharing db_session's DB."""
+    """An httpx.AsyncClient driving the app in-process, sharing db_session's
+    DB.
+    """
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
