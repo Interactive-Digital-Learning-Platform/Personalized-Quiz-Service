@@ -3,6 +3,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+import app.models  # noqa: F401 -- registers model metadata on Base
 from app.api.routes import analytics, quiz, user
 from app.core.config import settings
 from app.core.database import Base, engine
@@ -41,8 +42,6 @@ app.add_middleware(
 async def on_startup() -> None:
     logger.info("Starting %s [%s]", settings.PROJECT_NAME, settings.ENVIRONMENT)
     logger.info("Groq model: %s", settings.GROQ_MODEL)
-
-    import app.models  # noqa: F401
 
     async with engine.begin() as conn:
         # create_all only creates tables that don't exist yet — it never adds

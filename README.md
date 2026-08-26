@@ -18,3 +18,11 @@ Configure via environment variables (or .env):
 - `DATABASE_URL` (asyncpg format)
 - `GROQ_API_KEY` and `GROQ_ENDPOINT`
 - `CLERK_JWKS_URL`, `CLERK_ISSUER`, `CLERK_AUDIENCE` (optional)
+
+## Online 1v1 battle mode
+
+The competitive 1v1 battle feature (matchmaking, Elo rating, leaderboards,
+live WebSocket gameplay) has moved to its own microservice, `Quiz-online`
+(sibling repo) — it shares this service's Postgres database (real FKs into
+`users`/`questions`) but is deployed and versioned independently, reached
+through the API gateway at `/api/battle/...`.

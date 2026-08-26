@@ -175,3 +175,51 @@ async def test_analytics_with_unanswered_questions(client, db_session):
     # Denominator includes the unanswered questions (5), not just graded ones (3).
     assert data["total_questions_attempted"] == 5
     assert data["overall_accuracy"] == 40.0  # 2/5 * 100, NOT 2/3 * 100
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. Shuffle Mode submission attributes analytics to each REAL subject, not
+#    the session's own "Mixed" literal.
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def test_shuffle_submission_splits_analytics_per_real_subject(client, db_session):
+    user = await get_or_create_user(db_session, TEST_CLERK_ID)
+
+    # A Shuffle Mode session: QuizSession.subject is the "Mixed" literal
+    # (set at generation time whenever a shuffle quiz spans >1 subject), but
+    # each individual Question keeps its own real subject.
+    session = QuizSession(user_id=user.id, subject="Mixed", lesson="Mixed", difficulty="easy", question_count=4)
+    db_session.add(session)
+    await db_session.flush()
+
+    math_q1 = await _make_question(db_session, "Mathematics", 1)
+    math_q2 = await _make_question(db_session, "Mathematics", 2)
+    sci_q1 = await _make_question(db_session, "Science", 3)
+    sci_q2 = await _make_question(db_session, "Science", 4)
+    await db_session.commit()
+
+    resp = await client.post(
+        "/api/v1/quiz/submit",
+        json={
+            "session_id": session.id,
+            "ended_by": "submitted",
+            "answers": [
+                {"question_id": math_q1.id, "selected_answer": "A", "response_time": 4.0},
+                {"question_id": math_q2.id, "selected_answer": "A", "response_time": 4.0},
+                {"question_id": sci_q1.id, "selected_answer": "B", "response_time": 4.0},
+                {"question_id": sci_q2.id, "selected_answer": "B", "response_time": 4.0},
+            ],
+        },
+    )
+    assert resp.status_code == 200
+
+    analytics_resp = await client.get("/api/v1/analytics/me")
+    assert analytics_resp.status_code == 200
+    subjects_by_name = {s["subject"]: s for s in analytics_resp.json()["subjects"]}
+
+    # The bug this test guards against: a naive implementation attributes
+    # every subject's answers to the session's own (literal "Mixed")
+    # subject instead of each question's real subject.
+    assert "Mixed" not in subjects_by_name
+    assert subjects_by_name["Mathematics"]["accuracy"] == 100.0
+    assert subjects_by_name["Science"]["accuracy"] == 0.0
