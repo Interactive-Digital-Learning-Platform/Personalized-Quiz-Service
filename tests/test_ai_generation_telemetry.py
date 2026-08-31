@@ -73,11 +73,13 @@ async def _latest_event(db) -> AIGenerationEvent:
     return (await db.execute(stmt)).scalar_one()
 
 
-async def _seed_cached_questions(db, subject: str, difficulty: str, lesson: str, count: int) -> None:
+async def _seed_cached_questions(
+    db, subject: str, difficulty: str, lesson: str, count: int, grade: int | None = None
+) -> None:
     for i in range(count):
         db.add(Question(
             question=f"Cached question {i}?", options=["A", "B", "C", "D"], correct_answer="A",
-            subject=subject, lesson=lesson, difficulty=difficulty,
+            subject=subject, lesson=lesson, difficulty=difficulty, grade=grade,
         ))
     await db.commit()
 
@@ -112,15 +114,20 @@ async def test_successful_generation_records_telemetry(client, db_session):
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def test_failed_generation_falls_back_to_cache_and_records_telemetry(client, db_session):
+    # Grade 7 has no curriculum data (see app/data/curriculum/) -- deliberate
+    # here so this test's generic "Physics" lesson stand-in isn't filtered
+    # out by the grade-10/11 curriculum-lesson matching the cache fallback
+    # now applies (see test_quiz_generation_pool.py for dedicated
+    # curriculum-filtering tests).
     user = await get_or_create_user(db_session, TEST_CLERK_ID)
-    await _seed_cached_questions(db_session, "Science", "easy", "Physics", count=5)
+    await _seed_cached_questions(db_session, "Science", "easy", "Physics", count=5, grade=7)
 
     with patch(
         "app.services.quiz_service.generate_questions",
         new=AsyncMock(side_effect=HTTPException(status.HTTP_502_BAD_GATEWAY, detail="AI service error: boom")),
     ):
         resp = await client.post(
-            GENERATE_URL, json={"subject": "Science", "difficulty": "easy", "question_count": 5},
+            GENERATE_URL, json={"grade": 7, "subject": "Science", "difficulty": "easy", "question_count": 5},
         )
 
     assert resp.status_code == 201
@@ -139,13 +146,16 @@ async def test_failed_generation_falls_back_to_cache_and_records_telemetry(clien
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def test_failed_generation_without_fallback_still_records_telemetry(client, db_session):
-    # No cached questions exist for this subject/difficulty at all.
+    # No cached questions exist for this subject/difficulty at all. Grade 7
+    # has no curriculum data, so the made-up subject name is still accepted
+    # (legacy free-text behavior) rather than rejected by curriculum validation.
     with patch(
         "app.services.quiz_service.generate_questions",
         new=AsyncMock(side_effect=HTTPException(status.HTTP_502_BAD_GATEWAY, detail="AI returned malformed JSON: x")),
     ):
         resp = await client.post(
-            GENERATE_URL, json={"subject": "NoCacheSubject", "difficulty": "hard", "question_count": 5},
+            GENERATE_URL,
+            json={"grade": 7, "subject": "NoCacheSubject", "difficulty": "hard", "question_count": 5},
         )
 
     assert resp.status_code == 502
@@ -183,10 +193,13 @@ async def test_challenge_zone_never_exceeds_generation_call_budget(client, db_se
     # Seed cached questions at every tier so that once the shared budget
     # runs out for a later tier, it can still fall back to cache and the
     # request succeeds overall -- the point of this test is the call count,
-    # not whether cache happens to be empty.
-    await _seed_cached_questions(db_session, "Mathematics", "easy", "Algebra", count=10)
-    await _seed_cached_questions(db_session, "Mathematics", "medium", "Algebra", count=10)
-    await _seed_cached_questions(db_session, "Mathematics", "hard", "Algebra", count=10)
+    # not whether cache happens to be empty. Grade 7 has no curriculum data
+    # (see app/data/curriculum/), deliberate here so the generic "Algebra"
+    # lesson stand-in isn't filtered out by the grade-10/11 curriculum-lesson
+    # matching the pool/cache fallback now applies.
+    await _seed_cached_questions(db_session, "Mathematics", "easy", "Algebra", count=10, grade=7)
+    await _seed_cached_questions(db_session, "Mathematics", "medium", "Algebra", count=10, grade=7)
+    await _seed_cached_questions(db_session, "Mathematics", "hard", "Algebra", count=10, grade=7)
 
     call_count = {"n": 0}
 
@@ -202,7 +215,7 @@ async def test_challenge_zone_never_exceeds_generation_call_budget(client, db_se
         "app.services.quiz_service.generate_questions",
         new=AsyncMock(side_effect=_always_one_question),
     ):
-        resp = await client.post(GENERATE_URL, json={"subject": "Mathematics", "question_count": 10})
+        resp = await client.post(GENERATE_URL, json={"grade": 7, "subject": "Mathematics", "question_count": 10})
 
     assert resp.status_code == 201
     assert call_count["n"] <= settings.GROQ_MAX_GENERATION_CALLS_PER_REQUEST

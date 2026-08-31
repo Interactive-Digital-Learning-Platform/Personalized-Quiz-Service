@@ -115,10 +115,18 @@ async def backfill_user(db: AsyncSession, user: User, *, force: bool, dry_run: b
             }
         }
 
+        # grade=session.grade matters even for legacy (pre-taxonomy) history,
+        # where it's just None -- without passing it explicitly, every
+        # replayed row would land in the grade=NULL bucket regardless of the
+        # session's real grade, which under --force (which deletes existing
+        # grade-scoped rows first via _reset_existing_rows) would silently
+        # collapse a user's Grade 10/11-scoped mastery back into one
+        # ungraded row.
         await difficulty_service.update_mastery_after_submission(
             db=db, user_id=user.id, subject=session.subject,
             lesson_accuracy_breakdown=lesson_accuracy_breakdown,
             session=session, ended_by=completion.ended_by, graded_answers=graded_answers,
+            grade=session.grade,
         )
         await difficulty_service.update_subject_mastery_after_submission(
             db=db, user_id=user.id, subject=session.subject, accuracy=completion.accuracy,

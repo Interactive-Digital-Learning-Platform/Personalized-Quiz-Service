@@ -7,6 +7,7 @@ import app.models  # noqa: F401 -- registers model metadata on Base
 from app.api.routes import analytics, quiz, user
 from app.core.config import settings
 from app.core.database import Base, engine
+from app.services import rag_service
 
 logging.basicConfig(
     level=logging.DEBUG if settings.ENVIRONMENT == "development" else logging.INFO,
@@ -51,6 +52,16 @@ async def on_startup() -> None:
         logger.info("Running create_all — creating missing tables...")
         await conn.run_sync(Base.metadata.create_all)
         logger.info("Database tables are ready.")
+
+    # Best-effort: pre-loads the embedding/rerank models so the first quiz
+    # generation request doesn't pay that cost. Never blocks startup -- if
+    # Qdrant/models are unreachable now, rag_service's own timeouts and
+    # empty-result fallbacks mean quiz generation still works without RAG
+    # grounding, and a later request will retry the lazy init itself.
+    try:
+        rag_service.warm_up()
+    except Exception:
+        logger.exception("RAG warm-up failed — continuing without it")
 
 
 @app.on_event("shutdown")

@@ -51,6 +51,17 @@ class RepeatedQuestionAnalytics(BaseModel):
     mistake_correction_rate: float
 
 
+class BKTMasteryDetail(BaseModel):
+    # Bayesian Knowledge Tracing state (SkillBKTState) — a read-only P(know)
+    # signal, independent of mastery_score/mastery_level above (a different,
+    # weighted-average formula) and of adaptive_mastery on SubjectAnalytics
+    # below (the CEWM system that actually drives difficulty).
+    p_know: float
+    mastery_label: str
+    opportunities: int
+    last_updated: datetime | None
+
+
 class TopicAnalytics(BaseModel):
     topic: str
     total_attempted: int
@@ -75,6 +86,7 @@ class TopicAnalytics(BaseModel):
     mastery_score: float | None
     mastery_level: str
     mastery_components: MasteryComponents | None
+    bkt_mastery: BKTMasteryDetail | None
 
 
 class SubjectDifficultyPerformance(BaseModel):
@@ -120,6 +132,8 @@ class SubjectAnalytics(BaseModel):
     mastery_level: str
     mastery_components: MasteryComponents | None
     adaptive_mastery: AdaptiveMasteryDetail | None
+    mastered_skill_count: int
+    total_skill_count: int
 
 
 class EffortComponents(BaseModel):

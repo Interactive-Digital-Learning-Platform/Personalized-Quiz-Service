@@ -27,6 +27,23 @@ _groq_client = AsyncGroq(api_key=settings.GROQ_API_KEY)
 # would just fail the same way again, so those raise immediately instead.
 _TRANSIENT_GROQ_ERRORS = (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError)
 
+_REFERENCE_MATERIAL_RULES = """
+REFERENCE MATERIAL RULES (only apply when reference material is provided below):
+- Ground facts, terminology, and examples in it — prefer it over your own general knowledge if the two conflict.
+- Do NOT copy sentences verbatim — write original question/option phrasing.
+- If it doesn't cover something you need, fall back to your own knowledge of the standard syllabus.
+"""
+
+
+def _build_reference_block(snippets: list[str] | None, limit: int) -> str:
+    # Flat "reference material" block used for the lesson-pinned path and the
+    # no-curriculum random-lesson path -- see the lesson_choices branch below
+    # for the per-lesson variant used when a curriculum lesson list exists.
+    if not snippets:
+        return ""
+    lines = "\n".join(f"- {s}" for s in snippets[:limit])
+    return f"\n\nREFERENCE MATERIAL (grounding excerpts from the curriculum):\n{lines}\n"
+
 
 async def _create_chat_completion_with_retry(
     *, messages: Iterable[ChatCompletionMessageParam], max_tokens: int = 4096,
@@ -67,11 +84,14 @@ async def generate_questions(
     difficulty: str,
     question_count: int,
     lesson: str | None = None,
+    lesson_choices: list[str] | None = None,
     existing_questions: list[str] | None = None,
     avoid_lessons: list[str] | None = None,
     preferred_lessons: list[str] | None = None,
     adaptive_context: str | None = None,
     telemetry: dict | None = None,
+    reference_snippets: list[str] | None = None,
+    reference_by_lesson: dict[str, list[str]] | None = None,
 ) -> list[dict]:
     # Asks Groq for `question_count` MCQs and hands back a validated list of
     # dicts (question/options/correct_answer/explanation/lesson). If `lesson`
@@ -80,6 +100,13 @@ async def generate_questions(
     # passed to the model so it knows what not to repeat; `avoid_lessons`
     # nudges it toward topic variety across separate quiz generations, not
     # just within one quiz.
+    #
+    # `lesson_choices` is the curriculum's fixed lesson list for this
+    # (grade, subject) — see app/services/curriculum_service.py. When set
+    # (only possible when `lesson` is None, i.e. random_lessons), the model
+    # is told to pick from this exact list instead of inventing topic names,
+    # and each returned "lesson" is snapped to it post-generation. None for
+    # grades without curriculum data, preserving the old free-text behavior.
     #
     # `preferred_lessons` and `adaptive_context` are optional, additive hints
     # from the adaptive-mastery engine (weak lessons to weight coverage
@@ -90,10 +117,21 @@ async def generate_questions(
     # short natural-language hint — never raw DB rows/ids/scores, per the
     # "don't expose unnecessary internal DB details to the LLM" requirement.
     #
+    # `reference_snippets` / `reference_by_lesson` are optional grounding
+    # excerpts pulled from the curriculum knowledge base by app/services/
+    # rag_service.py (see quiz_service.py's call sites) -- flat list for the
+    # lesson-pinned and no-curriculum random-lesson paths, keyed by lesson
+    # for the curriculum-backed random-lesson path. Both default to None and
+    # change nothing about the prompt when omitted or empty, same contract
+    # as preferred_lessons/adaptive_context above. Retrieval is best-effort
+    # upstream (rag_service never raises), so this function never needs to
+    # handle a retrieval failure itself -- it just sees fewer/no snippets.
+    #
     # Raises HTTPException(502) on any Groq/parsing failure.
     existing_questions = existing_questions or []
     avoid_lessons = avoid_lessons or []
     random_lessons = lesson is None
+    has_reference_material = bool(reference_snippets) or bool(reference_by_lesson)
 
     system_prompt = """You are an expert educational content creator for Sri Lankan school students.
 Your task is to generate UNIQUE, DIVERSE multiple-choice quiz questions.
@@ -137,6 +175,8 @@ QUALITY RULES:
 - Do NOT include numbering in the question text.
 - Do NOT output anything outside the JSON object.
 """
+    if has_reference_material:
+        system_prompt += _REFERENCE_MATERIAL_RULES
 
     seed_context = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
@@ -168,6 +208,43 @@ QUALITY RULES:
 
         adaptive_context_block = f"\n\nStudent context: {adaptive_context}\n" if adaptive_context else ""
 
+        # Per-lesson references are embedded directly into lesson_list_block
+        # below when a curriculum lesson list exists -- this flat block only
+        # applies to the no-curriculum path, where there's no fixed lesson
+        # list to attach snippets to individually.
+        reference_block = "" if lesson_choices else _build_reference_block(
+            reference_snippets, settings.RAG_SNIPPETS_PER_LESSON
+        )
+
+        if lesson_choices:
+            def _lesson_line(l: str) -> str:
+                line = f"- {l}"
+                for snippet in (reference_by_lesson or {}).get(l, [])[: settings.RAG_SNIPPETS_PER_LESSON]:
+                    line += f"\n    Reference: {snippet}"
+                return line
+
+            lesson_list_block = "\n".join(_lesson_line(l) for l in lesson_choices)
+            lesson_requirement = (
+                f"- Choose each question's lesson from EXACTLY this fixed syllabus list — do "
+                f"NOT invent, rename, combine, or paraphrase a lesson name. Where a lesson has "
+                f"a \"Reference\" excerpt attached, ground that lesson's question in it:\n"
+                f"{lesson_list_block}\n"
+                f"- Distribute the {question_count} questions across these lessons as evenly as "
+                f"possible rather than repeating one lesson, unless the list is shorter than "
+                f"{question_count}.\n"
+                f"- Set each question's \"lesson\" field to the exact lesson name copied verbatim "
+                f"from the list above.\n"
+            )
+        else:
+            lesson_requirement = (
+                f"- Do NOT focus on a single lesson. EACH question must come from a DIFFERENT, "
+                f"randomly chosen lesson/topic within the full '{subject}' syllabus for this grade.\n"
+                f"- Spread the {question_count} questions across the breadth of the subject — "
+                f"avoid picking the same lesson for more than one question unless the subject "
+                f"genuinely has too few lessons to avoid it.\n"
+                f"- Set each question's \"lesson\" field to the specific topic IT individually covers.\n"
+            )
+
         user_prompt = (
             f"[Request ID: {seed_context}]\n\n"
             f"Generate {question_count} UNIQUE {difficulty}-difficulty multiple-choice questions "
@@ -176,20 +253,17 @@ QUALITY RULES:
             f"{exclusion_block}"
             f"{avoid_lessons_block}"
             f"{preferred_lessons_block}"
-            f"{adaptive_context_block}\n"
+            f"{adaptive_context_block}"
+            f"{reference_block}\n"
             f"Requirements:\n"
-            f"- Do NOT focus on a single lesson. EACH question must come from a DIFFERENT, "
-            f"randomly chosen lesson/topic within the full '{subject}' syllabus for this grade.\n"
-            f"- Spread the {question_count} questions across the breadth of the subject — "
-            f"avoid picking the same lesson for more than one question unless the subject "
-            f"genuinely has too few lessons to avoid it.\n"
-            f"- Set each question's \"lesson\" field to the specific topic IT individually covers.\n"
+            f"{lesson_requirement}"
             f"- Use a variety of question styles (factual, applied, scenario, comparison, cause-effect).\n"
             f"- Each question must be clearly distinct from all others in this set.\n\n"
             f"Return exactly {question_count} questions in the required JSON format."
         )
     else:
         adaptive_context_block = f"\n\nStudent context: {adaptive_context}\n" if adaptive_context else ""
+        reference_block = _build_reference_block(reference_snippets, settings.RAG_SNIPPETS_LESSON_PINNED)
         user_prompt = (
             f"[Request ID: {seed_context}]\n\n"
             f"Generate {question_count} UNIQUE {difficulty}-difficulty multiple-choice questions "
@@ -197,7 +271,8 @@ QUALITY RULES:
             f"Subject: {subject}\n"
             f"Lesson / Topic: {lesson}\n"
             f"{exclusion_block}"
-            f"{adaptive_context_block}\n"
+            f"{adaptive_context_block}"
+            f"{reference_block}\n"
             f"Requirements:\n"
             f"- Cover {question_count} DIFFERENT aspects or sub-concepts within '{lesson}'.\n"
             f"- Set every question's \"lesson\" field to exactly \"{lesson}\".\n"
@@ -244,6 +319,9 @@ QUALITY RULES:
             detail="AI returned an empty question list. Please try again.",
         )
 
+    lesson_by_lower = {l.lower(): l for l in lesson_choices} if lesson_choices else {}
+    lesson_usage_count = {l: 0 for l in lesson_choices} if lesson_choices else {}
+
     validated: list[dict] = []
     for i, q in enumerate(raw_questions[:question_count]):
         if not isinstance(q, dict):
@@ -253,7 +331,18 @@ QUALITY RULES:
         options = q.get("options", [])
         correct = str(q.get("correct_answer", "")).strip()
         explanation = str(q.get("explanation", "")).strip()
-        q_lesson = lesson if lesson else (str(q.get("lesson", "")).strip() or subject)
+
+        if lesson_choices:
+            q_lesson = lesson_by_lower.get(str(q.get("lesson", "")).strip().lower())
+            if q_lesson is None:
+                # Non-matching return: coerce to the least-used curriculum
+                # lesson so far rather than dropping the question (loses a
+                # whole generated question over a cosmetic label mismatch)
+                # or retrying (burns another Groq call for the same).
+                q_lesson = min(lesson_choices, key=lambda l: lesson_usage_count[l])
+            lesson_usage_count[q_lesson] += 1
+        else:
+            q_lesson = lesson if lesson else (str(q.get("lesson", "")).strip() or subject)
 
         # Must have exactly 4 options (Groq occasionally ignores that rule
         # and returns 5+). Truncating to 4 risks losing the actual correct
@@ -308,7 +397,9 @@ async def generate_shuffle_quiz_questions(
     subject_plan: list[tuple[str, str, int]],
     avoid_lessons_by_subject: dict[str, list[str]] | None = None,
     existing_questions_by_subject: dict[str, list[str]] | None = None,
+    lesson_choices_by_subject: dict[str, list[str]] | None = None,
     telemetry: dict | None = None,
+    reference_by_lesson_by_subject: dict[str, dict[str, list[str]]] | None = None,
 ) -> list[dict]:
     """Shuffle Mode's entire AI phase in ONE Groq call: asks for every
     subject's questions at once, each at that subject's own current
@@ -329,11 +420,19 @@ async def generate_shuffle_quiz_questions(
     A question whose "subject" doesn't match one of the requested subjects
     is dropped rather than guessed at.
 
+    `reference_by_lesson_by_subject` is the shuffle-mode counterpart of
+    generate_questions()'s `reference_by_lesson` -- grounding excerpts from
+    app/services/rag_service.py, keyed by subject then lesson. Optional and
+    additive like every other hint here; an absent/empty entry for a subject
+    changes nothing about that subject's block below.
+
     Raises HTTPException(502) on any Groq/parsing failure, same as
     generate_questions() -- the caller falls back to the DB cache.
     """
     avoid_lessons_by_subject = avoid_lessons_by_subject or {}
     existing_questions_by_subject = existing_questions_by_subject or {}
+    lesson_choices_by_subject = lesson_choices_by_subject or {}
+    reference_by_lesson_by_subject = reference_by_lesson_by_subject or {}
     total_count = sum(count for _, _, count in subject_plan)
 
     system_prompt = """You are an expert educational content creator for Sri Lankan school students.
@@ -375,6 +474,8 @@ QUALITY RULES:
 - Do NOT include numbering in the question text.
 - Do NOT output anything outside the JSON object.
 """
+    if any(reference_by_lesson_by_subject.values()):
+        system_prompt += _REFERENCE_MATERIAL_RULES
 
     seed_context = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
@@ -389,6 +490,23 @@ QUALITY RULES:
         line = f"- {subject}: {count} questions at {difficulty} difficulty"
         if avoid:
             line += f" (this student was recently quizzed on: {', '.join(avoid[:6])} — prefer other lessons where possible)"
+
+        lesson_choices = lesson_choices_by_subject.get(subject) or []
+        subject_reference_by_lesson = reference_by_lesson_by_subject.get(subject) or {}
+        if lesson_choices:
+            def _lesson_line(l: str) -> str:
+                line = f"    - {l}"
+                for snippet in subject_reference_by_lesson.get(l, [])[: settings.RAG_SNIPPETS_PER_LESSON]:
+                    line += f"\n        Reference: {snippet}"
+                return line
+
+            lesson_lines = "\n".join(_lesson_line(l) for l in lesson_choices)
+            line += (
+                f"\n  Choose each {subject} question's lesson from EXACTLY this fixed syllabus "
+                f"list — do NOT invent, rename, combine, or paraphrase a lesson name, and copy "
+                f"it verbatim into the \"lesson\" field. Where a lesson has a \"Reference\" "
+                f"excerpt attached, ground that lesson's question in it:\n{lesson_lines}"
+            )
 
         existing = existing_questions_by_subject.get(subject) or []
         if existing:
@@ -458,6 +576,17 @@ QUALITY RULES:
     difficulty_by_subject = {subject: difficulty for subject, difficulty, _ in subject_plan}
     subject_by_lower = {subject.lower(): subject for subject, _, _ in subject_plan}
 
+    lesson_by_lower_by_subject = {
+        subject: {l.lower(): l for l in choices}
+        for subject, choices in lesson_choices_by_subject.items()
+        if choices
+    }
+    lesson_usage_count_by_subject = {
+        subject: {l: 0 for l in choices}
+        for subject, choices in lesson_choices_by_subject.items()
+        if choices
+    }
+
     # A little overshoot is tolerated (the model sometimes returns a few
     # extra) -- the caller caps each subject at its own requested count.
     cap = total_count * 2
@@ -477,7 +606,18 @@ QUALITY RULES:
         options = q.get("options", [])
         correct = str(q.get("correct_answer", "")).strip()
         explanation = str(q.get("explanation", "")).strip()
-        question_lesson = str(q.get("lesson", "")).strip() or subject
+
+        subject_lesson_choices = lesson_choices_by_subject.get(subject) or []
+        if subject_lesson_choices:
+            question_lesson = lesson_by_lower_by_subject[subject].get(
+                str(q.get("lesson", "")).strip().lower()
+            )
+            if question_lesson is None:
+                usage = lesson_usage_count_by_subject[subject]
+                question_lesson = min(subject_lesson_choices, key=lambda l: usage[l])
+            lesson_usage_count_by_subject[subject][question_lesson] += 1
+        else:
+            question_lesson = str(q.get("lesson", "")).strip() or subject
 
         if not question_text or not isinstance(options, list) or len(options) != 4:
             logger.warning(

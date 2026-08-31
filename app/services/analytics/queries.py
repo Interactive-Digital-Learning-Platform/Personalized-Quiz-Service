@@ -8,8 +8,10 @@ from app.models.analytics import Analytics
 from app.models.question import Question
 from app.models.quiz_session import QuestionAttempt, QuizSession
 from app.models.quiz_tracking import QuizCompletion, QuizProgressSnapshot
+from app.models.skill_bkt_state import SkillBKTState
 from app.models.subject_mastery import SubjectMastery
 from app.services.analytics.types import (
+    BKTRow,
     DifficultyAttemptRow,
     DifficultySessionRow,
     GradedTotals,
@@ -257,6 +259,22 @@ async def fetch_topic_rows(db: AsyncSession, user_id: int) -> list[TopicRow]:
             total_attempted=int(r.total_attempted or 0),
             total_correct=int(r.total_correct or 0),
             last_attempted_at=as_utc(r.last_attempted_at),
+        )
+        for r in rows
+    ]
+
+
+async def fetch_bkt_rows(db: AsyncSession, user_id: int) -> list[BKTRow]:
+    # Unlike every other query in this file, this doesn't touch
+    # QuestionAttempt/QuizSession at all — SkillBKTState is already the
+    # aggregated, incrementally-updated result (see app/services/
+    # bkt_service.py), not something recomputed per analytics request.
+    stmt = select(SkillBKTState).where(SkillBKTState.user_id == user_id)
+    rows = (await db.execute(stmt)).scalars().all()
+    return [
+        BKTRow(
+            subject=r.subject, topic=r.lesson, p_know=r.p_know,
+            opportunities=r.opportunities, last_updated=r.updated_at,
         )
         for r in rows
     ]

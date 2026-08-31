@@ -1,11 +1,25 @@
 from app.core.config import settings
-from app.services import difficulty_service
+from app.services import bkt_service, difficulty_service
 from app.services.analytics.mastery_service import MasteryScoreService
 from app.services.analytics.repeated_mistake_service import RepeatedMistakeAnalyticsService
 from app.services.analytics.summary_service import compute_answering_behavior, compute_response_time_stats
 from app.services.analytics.trend_service import TrendAnalyticsService
-from app.services.analytics.types import ResponseTimeRow, TopicRow
+from app.services.analytics.types import BKTRow, ResponseTimeRow, TopicRow
 from app.services.scoring_service import classify_topic_status
+
+
+def _latest_bkt_by_topic(bkt_rows: list[BKTRow]) -> dict[tuple[str, str], BKTRow]:
+    # A (subject, lesson) pair can have more than one SkillBKTState row if
+    # the user has attempted it under different grades — analytics blends
+    # across grades everywhere else (SubjectMastery/topic rollups are
+    # grade-agnostic by design), so this keeps the most recently updated
+    # row per topic rather than picking arbitrarily or trying to merge them.
+    latest: dict[tuple[str, str], BKTRow] = {}
+    for row in bkt_rows:
+        key = (row.subject, row.topic)
+        if key not in latest or row.last_updated > latest[key].last_updated:
+            latest[key] = row
+    return latest
 
 
 class TopicAnalyticsService:
@@ -110,6 +124,27 @@ class TopicAnalyticsService:
                 topic_dict["mastery_score"] = mastery["mastery_score"]
                 topic_dict["mastery_level"] = mastery["mastery_level"]
                 topic_dict["mastery_components"] = mastery["mastery_components"]
+
+    @staticmethod
+    def attach_bkt_mastery(topics_by_subject: dict[str, list[dict]], bkt_rows: list[BKTRow]) -> None:
+        latest_by_topic = _latest_bkt_by_topic(bkt_rows)
+        for subject, topics in topics_by_subject.items():
+            for topic_dict in topics:
+                row = latest_by_topic.get((subject, topic_dict["topic"]))
+                if row is None:
+                    # No SkillBKTState row yet — brand-new skill, not "0% known".
+                    topic_dict["bkt_mastery"] = None
+                    continue
+                topic_dict["bkt_mastery"] = {
+                    "p_know": round(row.p_know, 4),
+                    "mastery_label": bkt_service.mastery_label(
+                        row.p_know,
+                        mastered_threshold=settings.BKT_MASTERED_THRESHOLD,
+                        learning_threshold=settings.BKT_LEARNING_THRESHOLD,
+                    ),
+                    "opportunities": row.opportunities,
+                    "last_updated": row.last_updated,
+                }
 
     @staticmethod
     def sort_topics(topics_by_subject: dict[str, list[dict]]) -> None:
