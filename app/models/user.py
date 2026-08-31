@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from app.models.analytics import Analytics
     from app.models.lesson_mastery import LessonMastery
     from app.models.quiz_session import QuizSession
+    from app.models.skill_bkt_state import SkillBKTState
     from app.models.subject_mastery import SubjectMastery
 
 
@@ -39,4 +40,7 @@ class User(Base):
     )
     subject_masteries: Mapped[list[SubjectMastery]] = relationship(
         "SubjectMastery", back_populates="user", cascade="all, delete-orphan"
+    )
+    skill_bkt_states: Mapped[list[SkillBKTState]] = relationship(
+        "SkillBKTState", back_populates="user", cascade="all, delete-orphan"
     )

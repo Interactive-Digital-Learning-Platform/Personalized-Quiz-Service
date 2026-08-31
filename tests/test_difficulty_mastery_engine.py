@@ -255,9 +255,10 @@ def test_trend_stable_with_enough_history():
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _FakeLessonMastery:
-    def __init__(self, mastery_score: float, evidence_count: int):
+    def __init__(self, mastery_score: float, evidence_count: int, lesson: str = "Lesson"):
         self.mastery_score = mastery_score
         self.evidence_count = evidence_count
+        self.lesson = lesson
 
 
 def test_rollup_empty_lessons_returns_none():
@@ -277,6 +278,49 @@ def test_rollup_high_evidence_lesson_does_not_linearly_dominate():
     result = engine.rollup_lesson_mastery_to_subject(rows)
     linear_weighted_average = (90.0 * 100 + 10.0 * 5) / (100 + 5)  # ~85.7 if uncapped
     assert result < linear_weighted_average
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# lesson -> subject roll-up: curriculum coverage
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_rollup_none_curriculum_lessons_reproduces_pre_coverage_behavior():
+    rows = [_FakeLessonMastery(90.0, 100, "Algebra"), _FakeLessonMastery(10.0, 5, "Geometry")]
+    with_none = engine.rollup_lesson_mastery_to_subject(rows, all_curriculum_lessons=None)
+    without_param = engine.rollup_lesson_mastery_to_subject(rows)
+    assert with_none == without_param
+
+
+def test_rollup_untested_curriculum_lessons_pull_average_toward_default():
+    # Only "Algebra" has ever been attempted (and mastered); the other 4
+    # curriculum lessons for this subject/grade have never been touched --
+    # they must dilute the rollup toward the neutral default, not be
+    # silently excluded.
+    rows = [_FakeLessonMastery(95.0, 50, "Algebra")]
+    curriculum = ["Algebra", "Geometry", "Trigonometry", "Statistics", "Probability"]
+
+    grinding_one_lesson = engine.rollup_lesson_mastery_to_subject(rows, all_curriculum_lessons=None)
+    coverage_aware = engine.rollup_lesson_mastery_to_subject(
+        rows, all_curriculum_lessons=curriculum, untested_lesson_default=50.0,
+    )
+    assert grinding_one_lesson == 95.0
+    assert coverage_aware < grinding_one_lesson
+    assert coverage_aware > 50.0  # still pulled up somewhat by the mastered lesson
+
+
+def test_rollup_fully_attempted_curriculum_adds_no_untested_entries():
+    rows = [_FakeLessonMastery(80.0, 10, "Algebra"), _FakeLessonMastery(60.0, 10, "Geometry")]
+    curriculum = ["Algebra", "Geometry"]  # every curriculum lesson already has evidence
+
+    with_coverage = engine.rollup_lesson_mastery_to_subject(rows, all_curriculum_lessons=curriculum)
+    without_coverage = engine.rollup_lesson_mastery_to_subject(rows, all_curriculum_lessons=None)
+    assert with_coverage == without_coverage
+
+
+def test_rollup_returns_untested_default_when_no_lessons_attempted_at_all():
+    curriculum = ["Algebra", "Geometry"]
+    result = engine.rollup_lesson_mastery_to_subject([], all_curriculum_lessons=curriculum, untested_lesson_default=50.0)
+    assert result == 50.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -427,3 +471,39 @@ def test_select_preferred_lessons_respects_max_lessons_cap():
     scores = {f"Lesson{i}": float(i) for i in range(10)}
     preferred = engine.select_preferred_lessons(scores, max_lessons=2)
     assert len(preferred) <= 2
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# blend_lesson_weakness_scores
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_blend_zero_weight_reproduces_cewm_exactly():
+    cewm = {"Algebra": 90.0, "Geometry": 20.0}
+    bkt = {"Algebra": 0.10, "Geometry": 0.95}  # deliberately opposite signal
+    blended = engine.blend_lesson_weakness_scores(cewm, bkt, bkt_weight=0.0)
+    assert blended == cewm
+
+
+def test_blend_full_weight_reproduces_bkt_exactly():
+    cewm = {"Algebra": 90.0, "Geometry": 20.0}
+    bkt = {"Algebra": 0.10, "Geometry": 0.95}
+    blended = engine.blend_lesson_weakness_scores(cewm, bkt, bkt_weight=1.0)
+    assert blended == {"Algebra": 10.0, "Geometry": 95.0}
+
+
+def test_blend_partial_weight_averages_both_sources():
+    cewm = {"Algebra": 80.0}
+    bkt = {"Algebra": 0.40}
+    blended = engine.blend_lesson_weakness_scores(cewm, bkt, bkt_weight=0.5)
+    assert blended["Algebra"] == (0.80 * 0.5 + 0.40 * 0.5) * 100.0
+
+
+def test_blend_lesson_present_in_only_one_source_uses_that_source_directly():
+    cewm = {"Algebra": 80.0}
+    bkt = {"Geometry": 0.20}
+    blended = engine.blend_lesson_weakness_scores(cewm, bkt, bkt_weight=0.5)
+    assert blended == {"Algebra": 80.0, "Geometry": 20.0}
+
+
+def test_blend_empty_inputs_returns_empty():
+    assert engine.blend_lesson_weakness_scores({}, {}, bkt_weight=0.3) == {}

@@ -1,7 +1,7 @@
 import logging
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -25,6 +25,7 @@ from app.schemas.quiz import (
     SubmitQuizRequest,
     SubmitQuizResponse,
 )
+from app.services import curriculum_service
 from app.services.analytics_service import update_analytics_after_submission
 from app.services.groq_service import generate_motivational_quote
 from app.services.quiz_service import (
@@ -38,6 +39,28 @@ from app.services.quiz_service import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/quiz", tags=["Quiz"])
+
+
+@router.get(
+    "/curriculum",
+    response_model=dict[str, list[str]],
+    summary="Get the fixed subject/lesson curriculum for a grade",
+    description=(
+        "Returns {subject: [lesson, ...]} for grades with curriculum data. "
+        "Returns an empty object for grades without one (those grades still "
+        "accept free-text subject/lesson in /quiz/generate)."
+    ),
+)
+async def get_curriculum(
+    grade: int = Query(10, ge=1, le=13),
+    current_user: dict = Depends(get_current_user),
+) -> dict[str, list[str]]:
+    if not curriculum_service.has_curriculum(grade):
+        return {}
+    return {
+        subject: curriculum_service.lessons_for(grade, subject)
+        for subject in curriculum_service.subjects_for_grade(grade)
+    }
 
 
 @router.post(
@@ -167,6 +190,7 @@ async def list_quiz_sessions(
             QuizSessionSummary(
                 session_id=session.id,
                 subject=session.subject,
+                grade=session.grade,
                 difficulty=session.difficulty,
                 question_count=session.question_count,
                 created_at=session.created_at,

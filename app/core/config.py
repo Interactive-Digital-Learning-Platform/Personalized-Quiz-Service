@@ -72,6 +72,26 @@ class Settings(BaseSettings):
     ANALYTICS_MASTERY_PROFICIENT_THRESHOLD: float = 70.0
     ANALYTICS_MASTERY_ADVANCED_THRESHOLD: float = 85.0
 
+    # ── Bayesian Knowledge Tracing ────────────────────────────────────────
+    # Per-skill P(know) signal (SkillBKTState), independent of both the
+    # ANALYTICS_MASTERY_* display score and the ADAPTIVE_MASTERY_* system
+    # that drives DIFFICULTY selection (BKT never touches difficulty) — see
+    # app/services/bkt_service.py. Standard textbook defaults for the BKT
+    # parameters themselves; not per-skill-calibrated.
+    BKT_P_INIT: float = 0.30
+    BKT_P_TRANSIT: float = 0.20
+    BKT_P_SLIP: float = 0.10
+    BKT_P_GUESS: float = 0.20
+    BKT_MASTERED_THRESHOLD: float = 0.80
+    BKT_LEARNING_THRESHOLD: float = 0.30
+    # How much BKT's p_know nudges automatic quiz generation's weak-lesson
+    # targeting (see difficulty_mastery_engine.blend_lesson_weakness_scores),
+    # blended with CEWM's LessonMastery.mastery_score. 0.0 = pure CEWM
+    # (today's behavior, instant rollback); 1.0 = pure BKT. Kept low by
+    # default since CEWM is tuned against real usage and BKT's own
+    # parameters above aren't yet.
+    BKT_LESSON_TARGETING_WEIGHT: float = 0.30
+
     # Same deal — these four growth weights should add up to 1.0.
     ANALYTICS_GROWTH_IMPROVEMENT_WEIGHT: float = 0.40
     ANALYTICS_GROWTH_CONSISTENCY_WEIGHT: float = 0.25
@@ -211,6 +231,54 @@ class Settings(BaseSettings):
     # mastery carries more say than a bare subject-wide accuracy average.
     ADAPTIVE_MASTERY_SUBJECT_LESSON_ROLLUP_WEIGHT: float = 0.60
     ADAPTIVE_MASTERY_SUBJECT_DIRECT_EVIDENCE_WEIGHT: float = 0.40
+
+    # Curriculum-aware coverage in the roll-up above (grades with curriculum
+    # data only — see curriculum_service.py): a curriculum lesson the
+    # student hasn't attempted yet folds into the roll-up at this neutral
+    # default score, so grinding one lesson can't drive the whole subject's
+    # mastery up without ever touching the others. Weight kept modest
+    # (~log1p(1)) so real practice across many lessons still dominates.
+    ADAPTIVE_MASTERY_UNTESTED_LESSON_DEFAULT: float = 50.0
+    ADAPTIVE_MASTERY_UNTESTED_LESSON_WEIGHT: float = 1.0
+
+    # ── RAG (curriculum retrieval for quiz grounding) ────────────────────
+    # Grounds Groq's generated questions in real curriculum excerpts pulled
+    # from Qdrant, mirroring AI-Learning-Assistant-Service's embed/retrieve/
+    # rerank pattern — see app/services/rag_service.py. Pure enhancement:
+    # every rag_service call degrades to empty results on any failure/
+    # timeout, never blocking or failing quiz generation itself.
+    RAG_ENABLED: bool = True
+    QDRANT_URL: str = ""
+    # Reuses PDF-Ingestion-Backend-Service's existing pdf_knowledge_base
+    # collection (already holds the ingested Grade 10/11 textbook PDFs)
+    # rather than a separate quiz-only collection. Points there were
+    # backfilled with `grade` (int) / `subject` (str) payload fields by
+    # qdrant-migrations/003_create_quiz_knowledge_base_collection.py so
+    # retrieval_service.py's grade+subject filter has something to match —
+    # see that migration for the filename → (grade, subject) mapping.
+    QUIZ_KNOWLEDGE_COLLECTION: str = "pdf_knowledge_base"
+    EMBEDDING_MODEL: str = "nomic-ai/nomic-embed-text-v1.5"
+    EMBEDDING_DEVICE: str = "cpu"
+    EMBEDDING_DIM: int = 768
+    RAG_MAX_QUERY_TOKENS: int = 8192
+    RAG_TOP_K_CHUNKS: int = 5
+    RAG_SCORE_THRESHOLD: float = 0.6
+    RERANK_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    RERANK_OVERFETCH: int = 4
+    # Every rag_service call is bounded by this timeout and falls back to
+    # empty results rather than ever raising into quiz_service/groq_service.
+    RAG_TIMEOUT_SECONDS: float = 8.0
+    # Bounds how many per-lesson retrieval queries one request can fan out
+    # into (each is an embed + Qdrant search + rerank) — a single-subject
+    # quiz caps at RAG_MAX_LESSON_QUERIES; a shuffle quiz spanning several
+    # subjects shares one larger combined cap across the whole batch so a
+    # many-subject shuffle can't fan out unboundedly.
+    RAG_MAX_LESSON_QUERIES: int = 8
+    RAG_MAX_LESSON_QUERIES_SHUFFLE: int = 12
+    RAG_MAX_CONCURRENT_QUERIES: int = 4
+    RAG_SNIPPETS_LESSON_PINNED: int = 4
+    RAG_SNIPPETS_PER_LESSON: int = 2
+    RAG_MAX_SNIPPET_CHARS: int = 700
 
     model_config = SettingsConfigDict(
         env_file=".env",

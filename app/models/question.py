@@ -1,6 +1,6 @@
 from typing import TYPE_CHECKING
 
-from sqlalchemy import JSON, Index, String, event
+from sqlalchemy import JSON, Index, Integer, String, event
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -29,6 +29,12 @@ class Question(Base):
     subject: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
     lesson: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
     difficulty: Mapped[str] = mapped_column(String(50), index=True, nullable=False)
+
+    # Null for legacy rows generated before the curriculum taxonomy existed.
+    # Scopes lesson identity alongside (subject, lesson) so same-named lessons
+    # in different grades (e.g. "Percentages" in both Grade 10 and 11 Math)
+    # aren't conflated.
+    grade: Mapped[int | None] = mapped_column(Integer, index=True, nullable=True)
 
     # Hash of (subject, lesson, question text) that identifies "the same or an
     # equivalent question" across rows — every AI generation creates fresh
