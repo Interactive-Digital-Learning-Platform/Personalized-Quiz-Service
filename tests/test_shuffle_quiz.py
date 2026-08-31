@@ -208,23 +208,26 @@ async def test_shuffle_generation_single_effective_subject_is_not_mixed(db_sessi
     counts() is patched to a fixed single-subject result so which subject
     gets picked doesn't depend on randomness here -- that randomization
     itself is covered separately below."""
-    all_six = ["Mathematics", "Science", "History", "English", "Geography", "Programming"]
+    # "ICT" (not "Programming") since Grade 10's curriculum names the subject
+    # ICT — "Programming" is one of ICT's Grade 11 lesson names, not a
+    # Grade 10 subject (see app/data/curriculum/grade_10.json).
+    all_six = ["Mathematics", "Science", "History", "English", "Geography", "ICT"]
     mock_create = AsyncMock(
-        return_value=_fake_chat_completion(_canned_shuffle_questions([("Programming", 1, "Prog")]))
+        return_value=_fake_chat_completion(_canned_shuffle_questions([("ICT", 1, "Prog")]))
     )
     payload = GenerateQuizRequest(shuffle=True, subjects=all_six, question_count=1)
 
     with (
         patch.object(groq_service._groq_client.chat.completions, "create", mock_create),
-        patch("app.services.quiz_service._allocate_shuffle_subject_counts", return_value={"Programming": 1}),
+        patch("app.services.quiz_service._allocate_shuffle_subject_counts", return_value={"ICT": 1}),
     ):
         session, questions, cache_hit, difficulty, lesson = await generate_quiz(
             db=db_session, clerk_id=TEST_CLERK_ID, payload=payload,
         )
 
     assert len(questions) == 1
-    assert questions[0].subject == "Programming"
-    assert session.subject == "Programming"
+    assert questions[0].subject == "ICT"
+    assert session.subject == "ICT"
     assert mock_create.call_count == 1
 
 
@@ -325,10 +328,15 @@ async def test_shuffle_global_db_fallback_fills_deficit_from_a_different_subject
     # pool-first read (which excludes a user's own attempt history) doesn't
     # consume it before the AI phase runs -- the point of this test is the
     # GLOBAL FALLBACK finding it, not the pool.
+    # Grade 7 has no curriculum data (see app/data/curriculum/) -- deliberate
+    # here so this test's generic "Biology" lesson stand-in isn't filtered
+    # out by the grade-10/11 curriculum-lesson matching that
+    # _fetch_shuffle_fallback_questions now applies (see
+    # test_quiz_generation_pool.py for dedicated curriculum-filtering tests).
     user = await get_or_create_user(db_session, TEST_CLERK_ID)
     science_question = Question(
         question="Cached Science fallback?", options=["A", "B", "C", "D"], correct_answer="A",
-        subject="Science", lesson="Biology", difficulty="easy",
+        subject="Science", lesson="Biology", difficulty="easy", grade=7,
     )
     db_session.add(science_question)
     await db_session.flush()
@@ -341,7 +349,9 @@ async def test_shuffle_global_db_fallback_fills_deficit_from_a_different_subject
             _canned_shuffle_questions([("Science", 1, "Sci"), ("History", 1, "Hist")])
         )
     )
-    payload = GenerateQuizRequest(shuffle=True, subjects=["Mathematics", "Science", "History"], question_count=3)
+    payload = GenerateQuizRequest(
+        grade=7, shuffle=True, subjects=["Mathematics", "Science", "History"], question_count=3,
+    )
 
     with (
         patch.object(groq_service._groq_client.chat.completions, "create", mock_create),
@@ -374,15 +384,17 @@ async def test_shuffle_falls_back_to_db_entirely_when_the_ai_call_fails_outright
     # Marked as already seen by this test user so the new pool-first read
     # doesn't consume them before the AI phase even runs -- the point of
     # this test is that an outright AI failure still recovers via the DB
-    # fallback tiers, not the pool.
+    # fallback tiers, not the pool. Grade 7 (no curriculum data) so the
+    # generic "Arithmetic"/"Biology" lesson stand-ins aren't filtered out by
+    # the grade-10/11 curriculum-lesson matching the DB fallback now applies.
     user = await get_or_create_user(db_session, TEST_CLERK_ID)
     math_question = Question(
         question="Cached Math fallback?", options=["A", "B", "C", "D"], correct_answer="A",
-        subject="Mathematics", lesson="Arithmetic", difficulty="easy",
+        subject="Mathematics", lesson="Arithmetic", difficulty="easy", grade=7,
     )
     science_question = Question(
         question="Cached Science fallback?", options=["A", "B", "C", "D"], correct_answer="A",
-        subject="Science", lesson="Biology", difficulty="easy",
+        subject="Science", lesson="Biology", difficulty="easy", grade=7,
     )
     db_session.add(math_question)
     db_session.add(science_question)
@@ -390,7 +402,7 @@ async def test_shuffle_falls_back_to_db_entirely_when_the_ai_call_fails_outright
     await _mark_questions_already_seen(db_session, user.id, [math_question, science_question])
 
     mock_create = AsyncMock(side_effect=_bad_request())
-    payload = GenerateQuizRequest(shuffle=True, subjects=["Mathematics", "Science"], question_count=2)
+    payload = GenerateQuizRequest(grade=7, shuffle=True, subjects=["Mathematics", "Science"], question_count=2)
 
     with patch.object(groq_service._groq_client.chat.completions, "create", mock_create):
         session, questions, cache_hit, difficulty, lesson = await generate_quiz(
@@ -428,15 +440,18 @@ async def test_shuffle_force_cache_skips_ai_entirely(db_session):
     """payload.force_cache (the "Use Cache" retry after a prior AI
     failure) must skip the AI phase entirely, going straight to the DB
     fallback for the full requested count."""
+    # Grade 7 (no curriculum data) so the generic "Arithmetic" lesson
+    # stand-in isn't filtered out by the grade-10/11 curriculum-lesson
+    # matching the pool/DB fallback now applies.
     db_session.add(Question(
         question="Cached Math fallback?", options=["A", "B", "C", "D"], correct_answer="A",
-        subject="Mathematics", lesson="Arithmetic", difficulty="easy",
+        subject="Mathematics", lesson="Arithmetic", difficulty="easy", grade=7,
     ))
     await db_session.commit()
 
     mock_create = AsyncMock()
     payload = GenerateQuizRequest(
-        shuffle=True, subjects=["Mathematics"], question_count=1, force_cache=True,
+        grade=7, shuffle=True, subjects=["Mathematics"], question_count=1, force_cache=True,
     )
 
     with patch.object(groq_service._groq_client.chat.completions, "create", mock_create):

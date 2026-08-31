@@ -114,6 +114,11 @@ class SubjectAnalyticsService:
 
         topics = self._topics_by_subject.get(subject, [])
         total_attempted = sum(t["total_attempted"] for t in topics)
+        # Computed from the FULL topic list (before the `topics[:max_topics]`
+        # slice below), so this rollup isn't undercounted by the display cap.
+        bkt_topics = [t["bkt_mastery"] for t in topics if t.get("bkt_mastery") is not None]
+        mastered_skill_count = sum(1 for b in bkt_topics if b["mastery_label"] == "mastered")
+        total_skill_count = len(bkt_topics)
         session_accuracies = [
             s["correct"] / s["total"] * 100.0 for s in subject_session_stats.values() if s["total"] > 0
         ]
@@ -161,4 +166,6 @@ class SubjectAnalyticsService:
             "mastery_level": mastery["mastery_level"],
             "mastery_components": mastery["mastery_components"],
             "adaptive_mastery": _build_adaptive_mastery_detail(self._mastery_by_subject.get(subject)),
+            "mastered_skill_count": mastered_skill_count,
+            "total_skill_count": total_skill_count,
         }

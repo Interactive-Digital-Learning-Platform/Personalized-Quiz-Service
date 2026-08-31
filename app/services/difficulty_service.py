@@ -11,7 +11,7 @@ from app.models.question import Question
 from app.models.quiz_session import QuestionAttempt, QuizSession
 from app.models.quiz_tracking import QuizCompletion
 from app.models.subject_mastery import SubjectMastery
-from app.services import difficulty_mastery_engine as engine
+from app.services import curriculum_service, difficulty_mastery_engine as engine
 
 logger = logging.getLogger(__name__)
 
@@ -130,12 +130,13 @@ def _log_mastery_change(
 # ── Row access ────────────────────────────────────────────────────────────
 
 async def _get_lesson_mastery_row(
-    db: AsyncSession, user_id: int, subject: str, lesson: str, *, for_update: bool = False
+    db: AsyncSession, user_id: int, subject: str, lesson: str, *, grade: int | None = None, for_update: bool = False
 ) -> LessonMastery | None:
     stmt = select(LessonMastery).where(
         LessonMastery.user_id == user_id,
         LessonMastery.subject == subject,
         LessonMastery.lesson == lesson,
+        LessonMastery.grade == grade if grade is not None else LessonMastery.grade.is_(None),
     )
     if for_update:
         stmt = stmt.with_for_update()
@@ -159,8 +160,10 @@ async def _get_subject_mastery_row(
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
-async def get_current_difficulty(db: AsyncSession, user_id: int, subject: str, lesson: str) -> str:
-    mastery = await _get_lesson_mastery_row(db, user_id, subject, lesson)
+async def get_current_difficulty(
+    db: AsyncSession, user_id: int, subject: str, lesson: str, grade: int | None = None
+) -> str:
+    mastery = await _get_lesson_mastery_row(db, user_id, subject, lesson, grade=grade)
     return mastery.difficulty if mastery is not None else DEFAULT_DIFFICULTY
 
 
@@ -240,8 +243,20 @@ class _RecentCompletionRow:
 
 
 async def _fetch_recent_completions(
-    db: AsyncSession, user_id: int, subject: str, limit: int
+    db: AsyncSession, user_id: int, subject: str, limit: int, *, grade: int | None = None
 ) -> list[_RecentCompletionRow]:
+    # `grade` only restricts the result when a real grade is given -- the
+    # subject-level rollup (update_subject_mastery_after_submission) always
+    # omits it on purpose, since SubjectMastery deliberately blends every
+    # grade's lesson evidence together. The lesson-level caller
+    # (update_mastery_after_submission) passes its own `grade` here so a
+    # grade-scoped LessonMastery row's promotion/demotion trend isn't pulled
+    # from a different grade's history of a same-named lesson (e.g. Grade 10
+    # vs Grade 11 "Percentages"). A legacy/ungraded submission (grade=None)
+    # still gets the old unfiltered behavior, unchanged.
+    filters = [QuizSession.user_id == user_id, QuizSession.subject == subject]
+    if grade is not None:
+        filters.append(QuizSession.grade == grade)
     stmt = (
         select(
             QuizSession.id, QuizCompletion.correct_count, QuizCompletion.total_questions,
@@ -249,7 +264,7 @@ async def _fetch_recent_completions(
         )
         .select_from(QuizCompletion)
         .join(QuizSession, QuizSession.id == QuizCompletion.session_id)
-        .where(QuizSession.user_id == user_id, QuizSession.subject == subject)
+        .where(*filters)
         .order_by(QuizSession.created_at.desc())
         .limit(limit)
     )
@@ -318,6 +333,7 @@ async def update_mastery_after_submission(
     session: QuizSession,
     ended_by: str,
     graded_answers: list[GradedAnswer],
+    grade: int | None = None,
 ) -> None:
     now = datetime.now(UTC)
     completion_evidence = engine.calculate_completion_evidence(
@@ -328,7 +344,7 @@ async def update_mastery_after_submission(
         db, user_id=user_id, session_id=session.id, session_created_at=session.created_at, fingerprints=fingerprints,
     )
     recent_completions = await _fetch_recent_completions(
-        db, user_id, subject, settings.ADAPTIVE_MASTERY_TRANSITION_LOOKBACK_QUIZZES
+        db, user_id, subject, settings.ADAPTIVE_MASTERY_TRANSITION_LOOKBACK_QUIZZES, grade=grade,
     )
 
     for lesson, stats in lesson_accuracy_breakdown.items():
@@ -346,10 +362,10 @@ async def update_mastery_after_submission(
         )
         fluency_values = _fluency_values_for(lesson_answers)
 
-        mastery = await _get_lesson_mastery_row(db, user_id, subject, lesson, for_update=True)
+        mastery = await _get_lesson_mastery_row(db, user_id, subject, lesson, grade=grade, for_update=True)
         if mastery is None:
             mastery = LessonMastery(
-                user_id=user_id, subject=subject, lesson=lesson, difficulty=DEFAULT_DIFFICULTY,
+                user_id=user_id, subject=subject, lesson=lesson, grade=grade, difficulty=DEFAULT_DIFFICULTY,
                 last_accuracy=0.0, consecutive_strong=0, consecutive_weak=0,
                 mastery_score=50.0, fluency_score=50.0, confidence_score=0.0, evidence_count=0,
                 trend_label="insufficient_data",
@@ -470,7 +486,16 @@ async def update_subject_mastery_after_submission(
     # submission's own lesson-level update, called separately, hasn't run
     # or every lesson came back "unknown").
     lesson_rows = await _get_all_lesson_mastery_rows(db, user_id, subject)
-    rollup = engine.rollup_lesson_mastery_to_subject(lesson_rows)
+    all_curriculum_lessons = (
+        curriculum_service.lessons_for(session.grade, subject)
+        if session.grade is not None and curriculum_service.has_curriculum(session.grade)
+        else None
+    )
+    rollup = engine.rollup_lesson_mastery_to_subject(
+        lesson_rows,
+        all_curriculum_lessons=all_curriculum_lessons,
+        untested_lesson_default=settings.ADAPTIVE_MASTERY_UNTESTED_LESSON_DEFAULT,
+    )
     if rollup is None:
         mastery.mastery_score = direct_mastery_score
     else:

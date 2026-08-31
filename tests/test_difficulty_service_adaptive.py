@@ -35,6 +35,7 @@ async def _submit(
     correct_count: int,
     ended_by: str = "submitted",
     answered_count: int | None = None,
+    grade: int | None = None,
 ) -> None:
     """Builds one full quiz submission and runs it through BOTH
     update_mastery_after_submission (lesson-level) and
@@ -45,7 +46,7 @@ async def _submit(
 
     session = QuizSession(
         user_id=user_id, subject=subject, lesson=lesson, difficulty=difficulty,
-        question_count=question_count,
+        question_count=question_count, grade=grade,
     )
     db.add(session)
     await db.flush()
@@ -80,7 +81,7 @@ async def _submit(
     await difficulty_service.update_mastery_after_submission(
         db=db, user_id=user_id, subject=subject,
         lesson_accuracy_breakdown={lesson: {"correct": correct_count, "total": answered_count, "accuracy": accuracy}},
-        session=session, ended_by=ended_by, graded_answers=graded_answers,
+        session=session, ended_by=ended_by, graded_answers=graded_answers, grade=grade,
     )
     await difficulty_service.update_subject_mastery_after_submission(
         db=db, user_id=user_id, subject=subject, accuracy=accuracy,
@@ -273,3 +274,129 @@ async def test_get_current_difficulty_reads_lesson_level_row_independent_of_subj
     subject_level = await difficulty_service.get_subject_difficulty(db_session, user.id, "Mathematics")
     assert lesson_level == "hard"
     assert subject_level == "easy"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Grade-scoped lesson mastery (curriculum taxonomy) — same-named lessons in
+# different grades (e.g. "Percentages" in both Grade 10 and 11 Mathematics)
+# must not be conflated into one LessonMastery row.
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def test_same_named_lesson_in_different_grades_gets_separate_mastery_rows(db_session):
+    user = await get_or_create_user(db_session, TEST_CLERK_ID)
+    await _submit(
+        db_session, user.id, "Mathematics", "Percentages", "easy",
+        question_count=10, correct_count=9, grade=10,
+    )
+    await _submit(
+        db_session, user.id, "Mathematics", "Percentages", "easy",
+        question_count=10, correct_count=2, grade=11,
+    )
+
+    stmt = select(LessonMastery).where(
+        LessonMastery.user_id == user.id, LessonMastery.subject == "Mathematics", LessonMastery.lesson == "Percentages",
+    )
+    rows = (await db_session.execute(stmt)).scalars().all()
+
+    assert len(rows) == 2
+    rows_by_grade = {row.grade: row for row in rows}
+    assert set(rows_by_grade) == {10, 11}
+    # A 9/10 and a 2/10 submission on the "same" lesson name must not have
+    # blended into one shared mastery score.
+    assert rows_by_grade[10].mastery_score > rows_by_grade[11].mastery_score
+
+
+async def test_get_current_difficulty_is_scoped_by_grade(db_session):
+    user = await get_or_create_user(db_session, TEST_CLERK_ID)
+    db_session.add(LessonMastery(user_id=user.id, subject="Mathematics", lesson="Percentages", grade=10, difficulty="hard"))
+    db_session.add(LessonMastery(user_id=user.id, subject="Mathematics", lesson="Percentages", grade=11, difficulty="easy"))
+    await db_session.commit()
+
+    grade10_difficulty = await difficulty_service.get_current_difficulty(
+        db_session, user.id, "Mathematics", "Percentages", grade=10,
+    )
+    grade11_difficulty = await difficulty_service.get_current_difficulty(
+        db_session, user.id, "Mathematics", "Percentages", grade=11,
+    )
+    assert grade10_difficulty == "hard"
+    assert grade11_difficulty == "easy"
+
+
+async def test_legacy_grade_none_rows_are_unaffected_by_new_graded_rows(db_session):
+    # A pre-existing row from before the curriculum taxonomy existed
+    # (grade IS NULL) must stay its own row, distinct from a new grade=10
+    # submission on the same subject+lesson name.
+    user = await get_or_create_user(db_session, TEST_CLERK_ID)
+    db_session.add(LessonMastery(user_id=user.id, subject="Mathematics", lesson="Percentages", grade=None, difficulty="medium"))
+    await db_session.commit()
+
+    await _submit(
+        db_session, user.id, "Mathematics", "Percentages", "easy",
+        question_count=5, correct_count=5, grade=10,
+    )
+
+    stmt = select(LessonMastery).where(
+        LessonMastery.user_id == user.id, LessonMastery.subject == "Mathematics", LessonMastery.lesson == "Percentages",
+    )
+    rows = (await db_session.execute(stmt)).scalars().all()
+    assert len(rows) == 2
+    assert {row.grade for row in rows} == {None, 10}
+    legacy_row = next(row for row in rows if row.grade is None)
+    assert legacy_row.difficulty == "medium"  # untouched by the new grade=10 submission
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Curriculum-aware lesson -> subject rollup
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _get_subject_row(db, user_id: int, subject: str) -> SubjectMastery | None:
+    stmt = select(SubjectMastery).where(SubjectMastery.user_id == user_id, SubjectMastery.subject == subject)
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def test_grinding_one_lesson_does_not_max_out_subject_mastery_for_curriculum_grade(db_session):
+    # "Perimeter" is a real Grade 10 Mathematics curriculum lesson (see
+    # app/data/curriculum/grade_10.json) with 31 sibling lessons never
+    # touched here — the coverage-aware rollup must keep subject mastery
+    # well below what perfect performance on this one lesson alone would
+    # otherwise drive it to.
+    user = await get_or_create_user(db_session, TEST_CLERK_ID)
+    for _ in range(6):
+        await _submit(
+            db_session, user.id, "Mathematics", "Perimeter", "easy",
+            question_count=10, correct_count=10, grade=10,
+        )
+
+    lesson_row = (await db_session.execute(
+        select(LessonMastery).where(
+            LessonMastery.user_id == user.id, LessonMastery.subject == "Mathematics",
+            LessonMastery.lesson == "Perimeter", LessonMastery.grade == 10,
+        )
+    )).scalar_one()
+    subject_row = await _get_subject_row(db_session, user.id, "Mathematics")
+
+    assert lesson_row.mastery_score > 80.0  # the practiced lesson is genuinely well-mastered
+    assert subject_row.mastery_score < lesson_row.mastery_score - 15.0  # but the subject as a whole isn't
+
+
+async def test_grinding_one_lesson_is_unaffected_for_grade_without_curriculum(db_session):
+    # Grade 7 has no curriculum.json — coverage-awareness must no-op
+    # entirely, preserving the pre-existing (attempted-lessons-only) rollup.
+    user = await get_or_create_user(db_session, TEST_CLERK_ID)
+    for _ in range(6):
+        await _submit(
+            db_session, user.id, "Mathematics", "Perimeter", "easy",
+            question_count=10, correct_count=10, grade=7,
+        )
+
+    lesson_row = (await db_session.execute(
+        select(LessonMastery).where(
+            LessonMastery.user_id == user.id, LessonMastery.subject == "Mathematics",
+            LessonMastery.lesson == "Perimeter", LessonMastery.grade == 7,
+        )
+    )).scalar_one()
+    subject_row = await _get_subject_row(db_session, user.id, "Mathematics")
+
+    # No curriculum data for grade 7 -> subject mastery tracks the one
+    # practiced lesson closely, same as before this feature existed.
+    assert subject_row.mastery_score > lesson_row.mastery_score - 10.0
