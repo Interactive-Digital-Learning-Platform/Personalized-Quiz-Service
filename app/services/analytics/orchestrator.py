@@ -52,6 +52,7 @@ class AnalyticsOrchestrationService:
             session_stats = await queries.fetch_session_completion_stats(db, user.id)
             graded_totals = await queries.fetch_graded_totals(db, user.id)
             topic_rows = await queries.fetch_topic_rows(db, user.id)
+            bkt_rows = await queries.fetch_bkt_rows(db, user.id)
             response_time_rows = await queries.fetch_response_time_rows(db, user.id)
             session_completed_at = await queries.fetch_session_completed_at(db, user.id)
             trend_attempt_rows = await queries.fetch_trend_attempt_rows(db, user.id)
@@ -86,6 +87,7 @@ class AnalyticsOrchestrationService:
         with timed_phase("mastery"):
             mastery_service = MasteryScoreService(topic_difficulty_rows)
             TopicAnalyticsService.attach_mastery(topics_by_subject, mastery_service, trend_service, repeated_service)
+            TopicAnalyticsService.attach_bkt_mastery(topics_by_subject, bkt_rows)
             TopicAnalyticsService.sort_topics(topics_by_subject)
 
         with timed_phase("subjects"):

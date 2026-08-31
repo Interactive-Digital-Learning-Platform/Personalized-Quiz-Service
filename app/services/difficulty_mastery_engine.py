@@ -335,22 +335,50 @@ def calculate_trend(
 
 # ── Lesson -> subject roll-up ────────────────────────────────────────────
 
-def rollup_lesson_mastery_to_subject(lesson_rows: Sequence[LessonMastery]) -> float | None:
+def rollup_lesson_mastery_to_subject(
+    lesson_rows: Sequence[LessonMastery],
+    *,
+    all_curriculum_lessons: list[str] | None = None,
+    untested_lesson_default: float = 50.0,
+) -> float | None:
     """Evidence-weighted average of a subject's lessons' mastery_score,
     using log1p(evidence_count) as the weight so one heavily-practiced
     lesson can't linearly dominate the subject average the way a raw
     evidence_count weighting would. Returns None (graceful fallback --
     caller should keep whatever subject-level value it already has) if no
-    lesson has any evidence yet.
+    lesson has any evidence yet AND all_curriculum_lessons is None.
+
+    `all_curriculum_lessons` (the subject's full curriculum lesson list for
+    the submitting quiz's grade -- see curriculum_service.lessons_for(),
+    None for grades without curriculum data) makes this coverage-aware: any
+    curriculum lesson with no attempted-evidence row gets folded in at
+    `untested_lesson_default` with a fixed weight
+    (ADAPTIVE_MASTERY_UNTESTED_LESSON_WEIGHT), instead of being silently
+    excluded from the average. Without this, grinding one lesson in a
+    31-lesson subject could drive the WHOLE subject's mastery score up
+    without ever touching the other 30. Matched by lesson name only (not
+    grade), consistent with lesson_rows already blending across grades for
+    this subject. When None (the default), behavior is byte-identical to
+    before this parameter existed.
     """
     weighted_sum = 0.0
     weight_total = 0.0
+    tested_lesson_names: set[str] = set()
     for row in lesson_rows:
         if row.evidence_count <= 0:
             continue
         weight = math.log1p(row.evidence_count)
         weighted_sum += row.mastery_score * weight
         weight_total += weight
+        tested_lesson_names.add(row.lesson)
+
+    if all_curriculum_lessons is not None:
+        untested_weight = settings.ADAPTIVE_MASTERY_UNTESTED_LESSON_WEIGHT
+        for lesson_name in all_curriculum_lessons:
+            if lesson_name in tested_lesson_names:
+                continue
+            weighted_sum += untested_lesson_default * untested_weight
+            weight_total += untested_weight
 
     if weight_total == 0:
         return None
@@ -482,6 +510,34 @@ def describe_adaptive_context(mastery_score: float, confidence_score: float, tre
         "insufficient_data": "still early in their practice history",
     }.get(trend_label, "still early in their practice history")
     return f"{band} mastery level, {confidence_word} confidence in that estimate, {trend_phrase}."
+
+
+def blend_lesson_weakness_scores(
+    cewm_scores: dict[str, float], bkt_scores: dict[str, float], *, bkt_weight: float,
+) -> dict[str, float]:
+    """Combines CEWM's LessonMastery.mastery_score (0-100) with BKT's
+    p_know (0-1) into one 0-100 "how well known" score per lesson, for
+    select_preferred_lessons() below to pick weak lessons from -- see
+    app/services/bkt_service.get_subject_lesson_p_know_scores(). bkt_weight
+    of 0.0 reproduces cewm_scores exactly (today's behavior, easy rollback);
+    1.0 uses BKT alone. A lesson present in only one source uses that
+    source's value directly rather than being penalized for missing data,
+    matching select_preferred_lessons()'s own "no data = no-op" philosophy.
+    """
+    blended: dict[str, float] = {}
+    for lesson in cewm_scores.keys() | bkt_scores.keys():
+        cewm_norm = cewm_scores[lesson] / 100.0 if lesson in cewm_scores else None
+        bkt_p_know = bkt_scores.get(lesson)
+
+        if cewm_norm is not None and bkt_p_know is not None:
+            combined = cewm_norm * (1 - bkt_weight) + bkt_p_know * bkt_weight
+        elif cewm_norm is not None:
+            combined = cewm_norm
+        else:
+            combined = bkt_p_know
+
+        blended[lesson] = combined * 100.0
+    return blended
 
 
 def select_preferred_lessons(lesson_mastery_scores: dict[str, float], *, max_lessons: int = 3) -> list[str]:

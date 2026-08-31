@@ -26,6 +26,8 @@ class QuizSession(Base):
     subject: Mapped[str] = mapped_column(String(100), nullable=False)
     lesson: Mapped[str] = mapped_column(String(255), nullable=False)
     difficulty: Mapped[str] = mapped_column(String(50), nullable=False)
+    # Null for legacy rows generated before the curriculum taxonomy existed.
+    grade: Mapped[int | None] = mapped_column(Integer, nullable=True)
     question_count: Mapped[int] = mapped_column(Integer, nullable=False)
     questions_snapshot: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
 

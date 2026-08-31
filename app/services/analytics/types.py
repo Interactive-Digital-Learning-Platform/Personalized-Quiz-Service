@@ -15,6 +15,15 @@ class TopicRow:
 
 
 @dataclass(frozen=True, slots=True)
+class BKTRow:
+    subject: str
+    topic: str  # SkillBKTState.lesson — "topic" to match TopicRow's naming
+    p_know: float
+    opportunities: int
+    last_updated: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class ResponseTimeRow:
     subject: str
     topic: str

@@ -21,7 +21,9 @@ if TYPE_CHECKING:
 class LessonMastery(Base):
     __tablename__ = "lesson_mastery"
     __table_args__ = (
-        UniqueConstraint("user_id", "subject", "lesson", name="uq_lesson_mastery_user_subject_lesson"),
+        UniqueConstraint(
+            "user_id", "subject", "lesson", "grade", name="uq_lesson_mastery_user_subject_lesson_grade"
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
@@ -32,6 +34,10 @@ class LessonMastery(Base):
 
     subject: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
     lesson: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
+    # Null for legacy rows generated before the curriculum taxonomy existed.
+    # Part of the row's identity so same-named lessons in different grades
+    # (e.g. "Percentages" in both Grade 10 and 11 Math) get separate mastery.
+    grade: Mapped[int | None] = mapped_column(Integer, index=True, nullable=True)
 
     # Difficulty the next quiz for this (subject, lesson) should be generated at.
     difficulty: Mapped[str] = mapped_column(String(50), nullable=False, default="easy")

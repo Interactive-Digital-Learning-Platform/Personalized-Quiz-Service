@@ -3,6 +3,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.services import curriculum_service
+
 
 class GenerateQuizRequest(BaseModel):
     grade: int = Field(10, ge=1, le=13, description="School grade level (1–13)")
@@ -71,6 +73,36 @@ class GenerateQuizRequest(BaseModel):
             raise ValueError("subject is required when shuffle is not set")
         return self
 
+    @model_validator(mode="after")
+    def validate_curriculum_fields(self) -> "GenerateQuizRequest":
+        # Grades without curriculum data (e.g. 7-9, 12-13 until their JSON is
+        # added) keep the old fully permissive free-text behavior.
+        if not curriculum_service.has_curriculum(self.grade):
+            return self
+
+        if self.shuffle:
+            if self.subjects:
+                canon_subjects = []
+                for s in self.subjects:
+                    canon = curriculum_service.canonical_subject(self.grade, s)
+                    if canon is None:
+                        raise ValueError(f"'{s}' is not a valid Grade {self.grade} subject")
+                    canon_subjects.append(canon)
+                self.subjects = canon_subjects
+        elif self.subject:
+            canon_subject = curriculum_service.canonical_subject(self.grade, self.subject)
+            if canon_subject is None:
+                raise ValueError(f"'{self.subject}' is not a valid Grade {self.grade} subject")
+            self.subject = canon_subject
+            if self.lesson:
+                canon_lesson = curriculum_service.canonical_lesson(self.grade, canon_subject, self.lesson)
+                if canon_lesson is None:
+                    raise ValueError(
+                        f"'{self.lesson}' is not a valid lesson for {canon_subject} (Grade {self.grade})"
+                    )
+                self.lesson = canon_lesson
+        return self
+
 
 class QuestionOut(BaseModel):
     id: int
@@ -111,6 +143,7 @@ class SavedQuizResponse(BaseModel):
 class QuizSessionSummary(BaseModel):
     session_id: int
     subject: str
+    grade: int | None = None
     difficulty: str
     question_count: int
     created_at: datetime
