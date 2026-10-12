@@ -321,3 +321,66 @@ async def test_topic_specific_trends(client, db_session):
     history_trend = _subject(data, "History")["performance_trend"]
     assert history_trend["trend"] == "stable"
     assert history_trend["accuracy_change"] == 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9. accuracy_history — the per-quiz series behind the profile's line graph
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def test_accuracy_history_lines_up_with_trend_periods(client, db_session):
+    user = await get_or_create_user(db_session, TEST_CLERK_ID)
+    await _make_recent_sessions_window(
+        db_session, user.id, "Mathematics",
+        previous_correct_counts=[3, 3, 3, 3, 3],
+        current_correct_counts=[8, 8, 8, 8, 8],
+    )
+
+    data = (await client.get("/api/v1/analytics/me")).json()
+    history = data["accuracy_history"]
+    trend = data["performance_trend"]
+
+    assert [p["accuracy"] for p in history] == [30.0] * 5 + [80.0] * 5
+    assert [p["completed_at"] for p in history] == sorted(p["completed_at"] for p in history)
+    assert all(p["subject"] == "Mathematics" and p["total"] == 10 for p in history)
+
+    # The newest current_period_sessions points ARE the trend's current period,
+    # and the previous_period_sessions points right before them its previous one.
+    current = history[-trend["current_period_sessions"]:]
+    previous = history[-(trend["current_period_sessions"] + trend["previous_period_sessions"]):-trend["current_period_sessions"]]
+    weighted = lambda pts: sum(p["correct"] for p in pts) / sum(p["total"] for p in pts) * 100.0
+    assert weighted(current) == trend["current_period_accuracy"]
+    assert weighted(previous) == trend["previous_period_accuracy"]
+
+
+async def test_accuracy_history_excludes_retakes_and_deleted_sessions(client, db_session):
+    user = await get_or_create_user(db_session, TEST_CLERK_ID)
+    kept = await _make_completed_session(db_session, user.id, "Science", 4, 2, NOW - timedelta(days=3))
+    retake = await _make_completed_session(db_session, user.id, "Science", 4, 4, NOW - timedelta(days=2))
+    deleted = await _make_completed_session(db_session, user.id, "Science", 4, 4, NOW - timedelta(days=1))
+    retake.is_retake = True
+    deleted.deleted_at = NOW
+    await db_session.commit()
+
+    data = (await client.get("/api/v1/analytics/me")).json()
+
+    assert [p["session_id"] for p in data["accuracy_history"]] == [kept.id]
+    assert data["accuracy_history"][0]["accuracy"] == 50.0
+
+
+async def test_accuracy_history_capped_to_most_recent(client, db_session, monkeypatch):
+    monkeypatch.setattr(settings, "ANALYTICS_ACCURACY_HISTORY_LIMIT", 3)
+    user = await get_or_create_user(db_session, TEST_CLERK_ID)
+    sessions = [
+        await _make_completed_session(db_session, user.id, "English", 2, 1, NOW - timedelta(days=5 - i))
+        for i in range(5)
+    ]
+
+    data = (await client.get("/api/v1/analytics/me")).json()
+
+    assert [p["session_id"] for p in data["accuracy_history"]] == [s.id for s in sessions[-3:]]
+
+
+async def test_accuracy_history_empty_without_completed_quizzes(client, db_session):
+    await get_or_create_user(db_session, TEST_CLERK_ID)
+    data = (await client.get("/api/v1/analytics/me")).json()
+    assert data["accuracy_history"] == []

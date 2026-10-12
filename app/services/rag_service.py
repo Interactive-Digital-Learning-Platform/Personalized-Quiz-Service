@@ -8,9 +8,7 @@ from app.services.retrieval_service import RetrievalService
 
 logger = logging.getLogger(__name__)
 
-# Lazy module-level singletons -- mirrors the `_groq_client` singleton style
-# already used in groq_service.py, rather than introducing FastAPI app.state
-# DI that quiz_service.py's plain async functions don't otherwise use.
+# Lazy module-level singletons -- mirrors the `_groq_client` singleton style already used in groq_service.py rather than introducing FastAPI app.state DI.
 _embedder: EmbeddingGenerator | None = None
 _reranker: RerankService | None = None
 _retrieval_service: RetrievalService | None = None
@@ -32,21 +30,14 @@ def _init_retrieval_service() -> RetrievalService:
 
 
 async def _ensure_retrieval_service() -> RetrievalService:
-    # SentenceTransformer/CrossEncoder construction is synchronous and can
-    # take several seconds on a cold cache -- offloaded to a thread so a
-    # lazy first-call init (warm_up() wasn't called, or failed at startup)
-    # never blocks the event loop.
+    # SentenceTransformer/CrossEncoder construction is synchronous and can take several seconds on a cold cache -- offloaded to a thread so a lazy first-call init never blocks the event loop.
     if _retrieval_service is None:
         await asyncio.to_thread(_init_retrieval_service)
     return _retrieval_service  # type: ignore[return-value]
 
 
 def warm_up() -> None:
-    """Eagerly loads the embedding/rerank models so the first real request
-    doesn't pay the multi-second model-load cost. Safe to call when RAG is
-    disabled or Qdrant is unreachable -- callers (app/main.py) are expected
-    to catch and log any failure here rather than block startup on it.
-    """
+    # Eagerly loads the embedding/rerank models so the first real request doesn't pay the multi-second model-load cost; safe to call when RAG is disabled or Qdrant is unreachable.
     if not _is_available():
         logger.info("RAG disabled or QDRANT_URL unset — skipping model warm-up")
         return
@@ -72,11 +63,7 @@ async def get_snippets_for_lesson(
     lesson: str,
     max_snippets: int,
 ) -> list[str]:
-    """Best-effort retrieval of grounding excerpts for one (grade, subject,
-    lesson). Returns [] on any failure, timeout, disabled RAG, or no result
-    above the score threshold -- never raises. Quiz generation must succeed
-    identically whether or not this returns anything.
-    """
+    # Best-effort retrieval of grounding excerpts for one (grade, subject, lesson); returns [] on any failure, timeout, disabled RAG, or no result above threshold -- never raises.
     if not _is_available():
         return []
 
@@ -110,12 +97,7 @@ async def get_snippets_by_lesson(
     max_lessons: int,
     max_concurrent: int | None = None,
 ) -> dict[str, list[str]]:
-    """Runs get_snippets_for_lesson() over lessons[:max_lessons] concurrently,
-    bounded by a semaphore so a many-lesson subject doesn't fire off an
-    unbounded number of simultaneous embed/search/rerank calls on what is
-    typically a single-worker service. A lesson that errors or returns
-    nothing is simply absent from the result dict.
-    """
+    # Runs get_snippets_for_lesson() over lessons[:max_lessons] concurrently, bounded by a semaphore so a many-lesson subject doesn't fire off unbounded simultaneous calls; a lesson that errors or returns nothing is simply absent from the result.
     if not _is_available() or not lessons:
         return {}
 
@@ -142,13 +124,7 @@ async def get_snippets_by_lesson_for_subjects(
     max_total_lesson_queries: int,
     max_concurrent: int | None = None,
 ) -> dict[str, dict[str, list[str]]]:
-    """Shuffle mode's variant of get_snippets_by_lesson() -- fans out across
-    several subjects at once, sharing ONE combined cap on total (subject,
-    lesson) retrieval queries across the whole batch (max_total_lesson_
-    queries) rather than each subject getting its own allowance, so a
-    many-subject shuffle quiz can't multiply its retrieval fan-out by
-    subject count.
-    """
+    # Shuffle mode's variant of get_snippets_by_lesson() -- fans out across several subjects at once, sharing ONE combined cap on total (subject, lesson) queries so a many-subject shuffle can't multiply its retrieval fan-out.
     if not _is_available() or not subjects_lessons:
         return {}
 

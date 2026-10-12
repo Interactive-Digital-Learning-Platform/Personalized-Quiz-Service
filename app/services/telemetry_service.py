@@ -16,9 +16,7 @@ ERROR_CATEGORIES = (
 
 
 def categorize_generation_error(exc: BaseException) -> str:
-    # Only this coarse category ever reaches the DB — the exception's actual
-    # message is used here to classify it, then thrown away, so telemetry
-    # rows never end up holding anything sensitive.
+    # Only this coarse category ever reaches the DB — the exception's message is used here to classify it, then thrown away, so telemetry rows never hold anything sensitive.
     if isinstance(exc, SQLAlchemyError):
         return "database_error"
 
@@ -57,9 +55,7 @@ async def record_generation_event(
     latency_ms: float,
     error_category: str | None,
 ) -> None:
-    # Best-effort write, called from a `finally` block in quiz_service.
-    # generate_quiz() — a telemetry failure must never break quiz generation
-    # itself, so every exception here is deliberately swallowed.
+    # Best-effort write, called from a `finally` block in quiz_service.generate_quiz() — a telemetry failure must never break quiz generation, so every exception here is deliberately swallowed.
     try:
         event = AIGenerationEvent(
             user_id=user_id,
@@ -93,8 +89,7 @@ async def get_ai_generation_analytics(
     start_date=None,
     end_date=None,
 ) -> dict:
-    # System-wide, admin-only aggregate across ALL users (unlike
-    # GET /analytics/me, which is always scoped to one user).
+    # System-wide, admin-only aggregate across ALL users (unlike GET /analytics/me, which is scoped to one user).
     filters = []
     if start_date is not None:
         filters.append(AIGenerationEvent.created_at >= start_date)
@@ -127,10 +122,7 @@ async def get_ai_generation_analytics(
         p95_value = (await db.execute(p95_stmt)).scalar_one()
         p95 = round(float(p95_value or 0.0), 2)
     else:
-        # SQLite (the test DB) has no percentile_cont, so fall back to a pure
-        # Python implementation of the same statistic below — keeps both
-        # paths numerically consistent even though only Postgres gets the
-        # literal SQL feature.
+        # SQLite (the test DB) has no percentile_cont, so fall back to a pure Python implementation of the same statistic — keeps both paths numerically consistent.
         latencies_stmt = (
             select(AIGenerationEvent.latency_ms)
             .where(*filters)
@@ -160,8 +152,7 @@ async def get_ai_generation_analytics(
 
 
 def _percentile_cont(sorted_values: list[float], pct: float) -> float:
-    # Linear interpolation between the two closest ranks — same definition
-    # Postgres's percentile_cont uses, reimplemented here for SQLite.
+    # Linear interpolation between the two closest ranks — same definition Postgres's percentile_cont uses, reimplemented here for SQLite.
     if not sorted_values:
         return 0.0
     if len(sorted_values) == 1:

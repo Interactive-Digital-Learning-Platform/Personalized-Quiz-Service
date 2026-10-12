@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     ANALYTICS_TREND_SESSION_WINDOW: int = 5
     ANALYTICS_TREND_MIN_ATTEMPTS_PER_PERIOD: int = 1
     ANALYTICS_TREND_CHANGE_THRESHOLD: float = 5.0
+    # Most recent completed quizzes returned in /analytics/me accuracy_history
+    # (the profile's line graph). Must stay >= 2 * ANALYTICS_TREND_SESSION_WINDOW
+    # so both trend comparison periods are always fully present in the series.
+    ANALYTICS_ACCURACY_HISTORY_LIMIT: int = 30
 
     # These five mastery weights should add up to 1.0 — nothing enforces
     # that automatically, so keep it in mind if you tweak them.

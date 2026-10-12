@@ -21,17 +21,7 @@ async def update_analytics_after_submission(
     clerk_id: str,
     session_id: int,
 ) -> None:
-    # Recomputes each real subject's rolling (user, subject) Analytics row
-    # from ALL of that user's QuestionAttempt rows in that subject (not just
-    # this session), so it reflects lifetime performance. Subjects are read
-    # from each attempted Question's own `subject` -- NOT QuizSession.subject,
-    # which collapses to "Mixed" for a Shuffle Mode session spanning several
-    # subjects -- so a Mathematics question answered during Shuffle Mode
-    # updates Mathematics' analytics, never a "Mixed" bucket. A normal,
-    # single-subject session still resolves to exactly one subject here, so
-    # this is a no-op behavior change for non-shuffle quizzes. Called after
-    # every quiz submission — and also after a session delete, to keep these
-    # rows from going stale (see the DELETE /quiz/sessions/{id} route).
+    # Recomputes each real subject's rolling Analytics row from all of the user's QuestionAttempt rows in that subject, keyed by each Question's own subject rather than QuizSession.subject so Shuffle Mode sessions don't collapse into "Mixed".
     user = await get_or_create_user(db, clerk_id)
 
     session_result = await db.execute(
@@ -50,9 +40,7 @@ async def update_analytics_after_submission(
     )
     subjects = [row[0] for row in (await db.execute(subjects_stmt)).all()]
     if not subjects:
-        # No graded attempts recorded for this session (shouldn't normally
-        # happen for a submitted quiz) -- fall back to the session's own
-        # subject so a recompute still has something to key off of.
+        # No graded attempts recorded for this session -- fall back to the session's own subject.
         subjects = [session.subject]
 
     for subject in subjects:
@@ -119,10 +107,7 @@ async def _recompute_subject_analytics(
     analytics_row: Analytics | None = existing_result.scalar_one_or_none()
 
     if total == 0:
-        # Every session that ever fed this row has since been deleted (this
-        # only happens via the delete-triggered recompute — a submission
-        # always adds at least one attempt). Drop the row instead of leaving
-        # a stale "0% accuracy" card for a subject with no sessions left.
+        # Every session that ever fed this row has since been deleted -- drop the row instead of leaving a stale "0% accuracy" card.
         if analytics_row:
             await db.delete(analytics_row)
             logger.info("Removed analytics for user=%d, subject=%s: no sessions remain", user_id, subject)
@@ -152,6 +137,5 @@ async def _recompute_subject_analytics(
 
 
 async def get_user_analytics(db: AsyncSession, clerk_id: str) -> dict:
-    # Thin delegator to AnalyticsOrchestrationService (app/services/analytics/) —
-    # kept here so the routes don't need to import the orchestrator directly.
+    # Thin delegator to AnalyticsOrchestrationService (app/services/analytics/).
     return await _get_user_analytics(db, clerk_id)

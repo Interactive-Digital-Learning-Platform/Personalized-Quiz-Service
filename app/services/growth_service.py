@@ -22,10 +22,7 @@ def compute_rate_score(numerator: int, denominator: int) -> float | None:
 
 
 def compute_session_spacing_score(active_dates: list[date], *, neutral_score: float) -> float:
-    # 100 minus how erratically spaced the gaps between active-study days
-    # are — evenly spaced study days score near 100, bursty/random spacing
-    # scores lower. Needs at least 3 distinct active dates to say anything;
-    # below that, neutral_score is used instead.
+    # 100 minus how erratically spaced the gaps between active-study days are; needs at least 3 distinct active dates, below that neutral_score is used.
     if len(active_dates) < 3:
         return neutral_score
     ordered = sorted(set(active_dates))
@@ -53,13 +50,7 @@ def compute_effort_score(
     target_weak_topic_attempts: int,
     neutral_score: float,
 ) -> tuple[float, dict[str, float]]:
-    # Equal-weighted average of 5 components. Deliberately ignores accuracy
-    # entirely — someone who shows up and genuinely attempts questions scores
-    # well here even before they're accurate. Each count is normalized
-    # against a target and capped at 100, so raw volume alone can't inflate
-    # the score forever. weak_topic_attempts_score is neutral (not zero) when
-    # there are no weak topics right now — nothing to practice isn't a lack
-    # of effort.
+    # Equal-weighted average of 5 components; deliberately ignores accuracy entirely, and weak_topic_attempts_score is neutral (not zero) when there are no weak topics right now.
     components = {
         "completed_quiz_count_score": round(_normalize_to_target(completed_quiz_count, target_quizzes), 2),
         "attempted_question_count_score": round(
@@ -112,11 +103,7 @@ def compute_improvement_score(
     repeated_mistake_correction_rate: float | None,
     neutral_score: float,
 ) -> tuple[float, dict[str, float]]:
-    # recent_accuracy_change_score maps a +/- percentage-point change onto
-    # 0-100 around a neutral midpoint of 50 (no change = 50, +50pts = 100,
-    # -50pts = 0). topic_improvement_score only counts topics with a clear
-    # improving/declining direction — "stable" ones don't move the ratio
-    # either way.
+    # recent_accuracy_change_score maps a +/- percentage-point change onto 0-100 around a neutral midpoint of 50; topic_improvement_score only counts topics with a clear improving/declining direction.
     recent_accuracy_change_score = (
         neutral_score if accuracy_change is None else round(_clamp(50.0 + accuracy_change), 2)
     )
@@ -149,9 +136,7 @@ def compute_growth_score(
     improvement_weight: float,
     mastery_weight: float,
 ) -> float:
-    # mastery_score only carries a small (default 0.15) weight here on
-    # purpose — this metric is meant to reward the process (effort, showing
-    # up, improving), not let raw current performance dominate it.
+    # mastery_score only carries a small (default 0.15) weight on purpose — this metric rewards the process, not raw current performance.
     weighted_total = (
         _clamp(improvement_score) * improvement_weight
         + _clamp(consistency_score) * consistency_weight
@@ -209,10 +194,7 @@ def build_growth_analytics(
     strong_threshold: float,
     exceptional_threshold: float,
 ) -> dict:
-    # Gated on activity within the rolling window (not all-time history),
-    # since effort/consistency are both scoped to that same window — with no
-    # recent activity, growth can't be judged honestly no matter how much
-    # history exists further back.
+    # Gated on activity within the rolling window (not all-time history) since effort/consistency are both scoped to that same window.
     if total_attempts_in_window < min_attempts_in_window:
         return {
             "effort_score": None,

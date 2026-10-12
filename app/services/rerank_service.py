@@ -12,13 +12,7 @@ logger = logging.getLogger(__name__)
 class RerankService:
 
     def __init__(self, model_name: str = settings.RERANK_MODEL, device: str = settings.EMBEDDING_DEVICE):
-        # Without an explicit device, sentence-transformers auto-detects and
-        # picks MPS (Apple GPU) on Apple Silicon -- unlike embedding_service.
-        # EmbeddingGenerator, which already pins this via the same setting.
-        # First-use Metal shader compilation for this model has been
-        # observed to hang indefinitely in sandboxed/headless local dev
-        # environments (no interactive GPU/WindowServer access), so this
-        # must stay pinned to CPU the same way, not just left to auto-detect.
+        # Without an explicit device, sentence-transformers auto-detects MPS on Apple Silicon, whose first-use Metal shader compilation can hang indefinitely in sandboxed/headless dev environments -- pinned to CPU like embedding_service.EmbeddingGenerator to avoid that.
         self.model = CrossEncoder(model_name, device=device)
 
     async def rerank(self, query: str, candidates: list[SearchResult], top_k: int) -> list[SearchResult]:

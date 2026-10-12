@@ -118,6 +118,7 @@ class AnalyticsOrchestrationService:
             "strong_subjects": strong_subjects,
             "weak_subjects": weak_subjects,
             "performance_trend": overall_performance_trend,
+            "accuracy_history": trend_service.accuracy_history(settings.ANALYTICS_ACCURACY_HISTORY_LIMIT),
             "repeated_question_analytics": overall_repeated_question_analytics,
         }
 

@@ -50,10 +50,7 @@ def compute_performance_band(accuracy: float) -> str:
 
 
 def classify_topic_status(accuracy: float, total_attempted: int, min_attempts: int) -> str:
-    # Too few attempts always wins over accuracy — not enough data to call it
-    # either way. The 41% cutoff (not 40%) closes a gap the original spec
-    # left undefined between "weak <= 40" and "developing 41-69.99" for
-    # fractional accuracy values like 40.5%.
+    # Too few attempts always wins over accuracy; the 41% cutoff (not 40%) closes the gap left undefined between "weak <= 40" and "developing 41-69.99" for fractional values like 40.5%.
     if total_attempted < min_attempts:
         return "insufficient_data"
     if accuracy >= 70.0:
@@ -68,10 +65,7 @@ def is_valid_response_time(response_time: float | None, max_seconds: float) -> b
 
 
 def compute_median_and_stddev(values: list[float]) -> tuple[float, float]:
-    # Plain Python rather than Postgres's percentile_cont/stddev_samp,
-    # because the test suite runs against SQLite, which has no equivalent —
-    # doing it here means the tested code path and the real one are the same
-    # code, not two implementations that can quietly drift apart.
+    # Plain Python rather than Postgres's percentile_cont/stddev_samp, since the test suite runs against SQLite -- keeps the tested and real code paths identical rather than letting two implementations drift apart.
     if not values:
         return 0.0, 0.0
     median = round(statistics.median(values), 3)
@@ -89,10 +83,7 @@ def classify_answering_behavior(
     accurate_threshold: float,
     balanced_ratio: float,
 ) -> str:
-    # "Fast" is always judged against the user's own overall median response
-    # time, never a per-subject/topic one — so a subject is compared to the
-    # user's normal pace, not to itself. "Balanced" catches anything close
-    # enough to that median (within balanced_ratio) regardless of accuracy.
+    # "Fast" is always judged against the user's own overall median response time, never a per-subject/topic one; "Balanced" catches anything close enough to that median (within balanced_ratio) regardless of accuracy.
     if valid_attempt_count < min_attempts:
         return "insufficient_data"
 
@@ -129,13 +120,7 @@ def compute_performance_trend(
     change_threshold: float,
     now: datetime,
 ) -> dict:
-    # Compares recent activity against whatever came right before it, using
-    # WEIGHTED accuracy (total correct / total attempted across the whole
-    # period) so a 2-question session doesn't count as much as a 20-question
-    # one. Uses the latest N completed sessions vs the N before them once
-    # there's enough history (2x window_size); otherwise falls back to this
-    # week vs last week. Either way, if a period ends up with too few graded
-    # attempts, the result is "insufficient_data" rather than a shaky number.
+    # Compares recent activity against whatever came right before it using WEIGHTED accuracy so a 2-question session doesn't count as much as a 20-question one; uses the latest N sessions vs. the N before once there's enough history, else falls back to this week vs. last week, and returns "insufficient_data" if a period has too few graded attempts.
     sessions_sorted = sorted(
         session_stats.keys(), key=lambda sid: session_completed_at[sid], reverse=True
     )
@@ -173,8 +158,7 @@ def compute_performance_trend(
             "method": "insufficient_data",
         }
 
-    # Round once from the raw fractions so accuracy_change can't drift from
-    # current - previous due to each side being rounded independently first.
+    # Round once from the raw fractions so accuracy_change can't drift from current - previous due to each side being rounded independently first.
     current_accuracy_raw = current_correct / current_total * 100.0
     previous_accuracy_raw = previous_correct / previous_total * 100.0
     accuracy_change = round(current_accuracy_raw - previous_accuracy_raw, 2)
@@ -198,13 +182,7 @@ def compute_performance_trend(
 
 
 def compute_repeated_question_group_stats(ordered_corrects: list[bool]) -> dict[str, int]:
-    # One "group" = every attempt at the same question (by fingerprint),
-    # oldest first. Needs at least 2 entries — callers must have already
-    # dropped groups with a single attempt, since there's no "previous
-    # attempt" to compare against otherwise. A correct -> anything
-    # transition isn't a "mistake" event either way, so it only counts
-    # toward repeated_question_count/repeated_correct_count, not the
-    # corrected/repeated-mistake counters below.
+    # One "group" = every attempt at the same question (by fingerprint), oldest first; needs at least 2 entries since callers must have already dropped single-attempt groups. A correct -> anything transition isn't a "mistake" event, so it only counts toward repeated_question_count/repeated_correct_count.
     repeated = ordered_corrects[1:]
     repeated_correct_count = sum(1 for c in repeated if c)
     repeated_incorrect_count = len(repeated) - repeated_correct_count

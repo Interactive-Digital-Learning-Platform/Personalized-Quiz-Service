@@ -1,8 +1,6 @@
 from datetime import UTC, datetime
 
-# Lower = more urgent, and this is the PRIMARY sort key — severity (below)
-# only breaks ties within the same type, so a "weak_topic" always outranks a
-# "maintain_strong_subject" regardless of either one's severity score.
+# Lower = more urgent, and this is the PRIMARY sort key — severity (below) only breaks ties within the same type.
 TYPE_BASE_PRIORITY = {
     "weak_topic": 1,
     "declining_subject": 2,
@@ -34,8 +32,7 @@ def _severity_score(
     recency_weight: float,
     recency_half_life_days: float,
 ) -> float:
-    # Higher = more urgent — only used to order candidates that already
-    # share the same type (TYPE_BASE_PRIORITY decides which types win).
+    # Higher = more urgent — only used to order candidates that already share the same type.
     score = 0.0
     if accuracy is not None:
         score += (100.0 - accuracy) * accuracy_weight
@@ -45,18 +42,14 @@ def _severity_score(
         score += (100.0 - mastery_score) * mastery_weight
     if last_attempted_at is not None:
         days_ago = max((now - last_attempted_at).total_seconds() / 86400.0, 0.0)
-        # Exponential decay — something struggled with yesterday is more
-        # actionable today than something struggled with two months ago.
+        # Exponential decay — something struggled with yesterday is more actionable today than two months ago.
         recency_factor = 0.5 ** (days_ago / recency_half_life_days)
         score += recency_factor * 100.0 * recency_weight
     return score
 
 
 def _subject_topic_totals(subject_data: dict) -> tuple[int, datetime | None]:
-    # Only used as tie-breaker inputs for subject-level candidates. Since
-    # subjects[].topics is capped for display, a subject with more topics
-    # than that cap gets slightly undercounted here — fine, since this only
-    # affects ordering among same-type candidates, never whether one triggers.
+    # Only used as tie-breaker inputs for subject-level candidates; a subject with more topics than the display cap gets slightly undercounted here, which only affects ordering, never whether one triggers.
     topics = subject_data["topics"]
     if not topics:
         return 0, None
@@ -171,9 +164,7 @@ def _build_candidates(analytics: dict, *, settings_obj) -> list[dict]:
                 },
             })
 
-        # Only fires when the existing SubjectMastery streak already says
-        # the student is one strong quiz from promotion — never invents its
-        # own readiness criteria separate from the real adaptive-difficulty engine.
+        # Only fires when the existing SubjectMastery streak already says the student is one strong quiz from promotion — never invents its own readiness criteria.
         if (
             subject_data["consecutive_strong_quizzes"] >= 1
             and subject_data["consecutive_strong_quizzes"] == subject_data["quizzes_required_for_promotion"] - 1
@@ -241,11 +232,7 @@ def generate_recommendations(
     settings_obj=None,
     now: datetime | None = None,
 ) -> list[dict]:
-    # Builds the final, capped, deduplicated, priority-ordered list from an
-    # already-assembled analytics dict — no DB access, no Groq, fully
-    # deterministic. Returns [] when nothing triggers, which naturally
-    # happens whenever there's too little data (every trigger already
-    # requires its own minimum, e.g. "weak" status needs enough attempts).
+    # Builds the final, capped, deduplicated, priority-ordered list from an already-assembled analytics dict — no DB access, no Groq, fully deterministic. Returns [] when nothing triggers.
     if settings_obj is None:
         from app.core.config import settings as settings_obj
     if now is None:
@@ -273,8 +260,7 @@ def generate_recommendations(
         )
         candidate["_sort_key"] = (TYPE_BASE_PRIORITY[candidate["type"]], -severity)
 
-    # Keep only the single best candidate per (subject, topic) — no
-    # duplicate recommendations for the same subject/topic pair.
+    # Keep only the single best candidate per (subject, topic) — no duplicate recommendations for the same pair.
     best_by_key: dict[tuple[str | None, str | None], dict] = {}
     for candidate in candidates:
         key = (candidate["subject"], candidate["topic"])
