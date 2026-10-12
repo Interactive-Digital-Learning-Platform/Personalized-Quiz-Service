@@ -20,10 +20,7 @@ def update_p_know(
     p_slip: float,
     p_guess: float,
 ) -> float:
-    # Standard 2-parameter-observation BKT update: Bayesian posterior from
-    # the observation (using slip/guess), then apply the learning
-    # transition. p_transit models that even a "doesn't know it yet"
-    # student may have learned the skill during this very attempt.
+    # Standard 2-parameter-observation BKT update: Bayesian posterior from the observation, then apply the learning transition.
     if correct:
         numerator = p_know * (1 - p_slip)
         denominator = numerator + (1 - p_know) * p_guess
@@ -49,15 +46,7 @@ def mastery_label(
     return "not_started"
 
 
-# Keyed by (subject, lesson, grade). AsyncSessionLocal is created with
-# autoflush=False (app/core/database.py), so a pending SkillBKTState insert
-# is NOT visible to a subsequent SELECT within the same batch — without this
-# cache, folding two answers for the same skill in one batch (e.g. every
-# question in a single-lesson quiz, or replaying backfill history) would
-# create and try to insert two rows for the same natural key, violating
-# uq_skill_bkt_state_user_subject_lesson_grade. Callers that process more
-# than one answer/attempt per batch must create one cache and reuse it for
-# every get_or_create_state call in that batch.
+# Keyed by (subject, lesson, grade); needed because autoflush=False means a pending insert isn't visible to a subsequent SELECT in the same batch, so callers must reuse one cache across a batch's get_or_create_state calls to avoid duplicate-key inserts.
 StateCache = dict[tuple[str, str, int | None], SkillBKTState]
 
 
@@ -78,9 +67,7 @@ async def get_or_create_state(
     )
     state = (await db.execute(stmt)).scalar_one_or_none()
     if state is None:
-        # Column defaults (opportunities=0, last_correct=None) only apply at
-        # flush time — set them explicitly since apply_observation() mutates
-        # this object before it's ever flushed.
+        # Column defaults only apply at flush time — set them explicitly since apply_observation() mutates this object before it's ever flushed.
         state = SkillBKTState(
             user_id=user_id, subject=subject, lesson=lesson, grade=grade,
             p_know=settings.BKT_P_INIT, opportunities=0, last_correct=None,
@@ -92,8 +79,7 @@ async def get_or_create_state(
 
 
 def apply_observation(state: SkillBKTState, correct: bool) -> None:
-    # Shared by the live submission path and the historical backfill script
-    # so both fold an observation into a SkillBKTState row identically.
+    # Shared by the live submission path and the historical backfill script so both fold an observation identically.
     state.p_know = update_p_know(
         state.p_know, correct,
         p_transit=settings.BKT_P_TRANSIT,
@@ -106,13 +92,7 @@ def apply_observation(state: SkillBKTState, correct: bool) -> None:
 
 
 async def get_subject_lesson_p_know_scores(db: AsyncSession, user_id: int, subject: str) -> dict[str, float]:
-    # Mirrors difficulty_service.get_subject_lesson_mastery_scores()'s shape
-    # and (deliberately) its lack of grade-scoping, so the two can be
-    # blended directly — see difficulty_mastery_engine.blend_lesson_weakness_scores.
-    # A lesson can have more than one row if the user has attempted it under
-    # different grades; same precedent as analytics/topic_service.py's
-    # _latest_bkt_by_topic — keep the most recently updated row rather than
-    # picking arbitrarily or trying to merge them.
+    # Mirrors difficulty_service.get_subject_lesson_mastery_scores()'s shape (no grade-scoping) so the two can be blended directly; if a lesson has rows under multiple grades, keeps the most recently updated one.
     stmt = select(SkillBKTState).where(SkillBKTState.user_id == user_id, SkillBKTState.subject == subject)
     rows = (await db.execute(stmt)).scalars().all()
 
@@ -131,10 +111,7 @@ async def update_bkt_after_submission(
     grade: int | None,
     graded_answers: list[GradedAnswer],
 ) -> None:
-    # Answers must be processed in submission order — a shuffle-mode session
-    # interleaves multiple skills across one answer list, and each skill's
-    # own state needs to fold in only its own answers, in the order they
-    # were actually attempted.
+    # Answers must be processed in submission order — a shuffle-mode session interleaves multiple skills across one answer list.
     cache: StateCache = {}
     for answer in graded_answers:
         if answer.correct is None:

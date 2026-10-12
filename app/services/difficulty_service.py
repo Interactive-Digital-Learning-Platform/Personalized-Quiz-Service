@@ -17,29 +17,23 @@ logger = logging.getLogger(__name__)
 
 DIFFICULTY_LEVELS = ["easy", "medium", "hard"]
 DEFAULT_DIFFICULTY = "easy"
-# Re-exported for app/services/analytics/mastery_service.py, which reads it
-# as difficulty_service.DIFFICULTY_BASE_SCORES.
+# Re-exported for app/services/analytics/mastery_service.py, which reads it as difficulty_service.DIFFICULTY_BASE_SCORES.
 DIFFICULTY_BASE_SCORES = engine.DIFFICULTY_BASE_SCORES
 
-# Legacy streak thresholds -- consecutive_strong/weak still track these as
-# secondary evidence, but determine_difficulty_transition() now decides difficulty.
+# Legacy streak thresholds -- kept as secondary evidence; determine_difficulty_transition() now decides difficulty.
 PROMOTE_ACCURACY_THRESHOLD = 80.0
 DEMOTE_ACCURACY_THRESHOLD = 40.0
 PROMOTE_STREAK_REQUIRED = 2
 DEMOTE_STREAK_REQUIRED = 1
 
 
-# The only two concrete row types this module ever operates on -- a plain
-# Union here (rather than a structural Protocol) avoids a known false-positive
-# where SQLAlchemy's Mapped[T] class attributes don't structurally satisfy a
-# Protocol that redeclares the same attributes as plain mutable T.
+# The only two concrete row types this module ever operates on -- a plain Union avoids a known false-positive with SQLAlchemy's Mapped[T] against a structural Protocol.
 _MasteryRow = LessonMastery | SubjectMastery
 
 
 @dataclass
 class GradedAnswer:
-    # Built once by quiz_service.submit_quiz() and passed to both update
-    # functions so neither has to re-derive correctness or re-fetch Question rows.
+    # Built once by quiz_service.submit_quiz() and passed to both update functions so neither has to re-derive correctness or re-fetch Question rows.
     subject: str
     lesson: str
     difficulty: str
@@ -59,9 +53,7 @@ def _clamp_percentage(value: float) -> float:
 
 
 def _update_secondary_streak_counters(mastery: _MasteryRow, accuracy: float) -> None:
-    # Same streak definition as before promotion/demotion moved to the new
-    # engine -- kept purely as secondary/informational evidence now, per
-    # the spec's instruction to preserve it rather than drop it.
+    # Same streak definition as before promotion/demotion moved to the new engine -- kept purely as secondary/informational evidence now.
     if accuracy >= PROMOTE_ACCURACY_THRESHOLD:
         mastery.consecutive_strong += 1
         mastery.consecutive_weak = 0
@@ -75,8 +67,7 @@ def _update_secondary_streak_counters(mastery: _MasteryRow, accuracy: float) -> 
 
 
 def _promotion_requirements(current_difficulty: str) -> tuple[float, int, int] | None:
-    """(mastery_threshold, min_evidence_count, min_qualifying_completions)
-    for promoting OUT of current_difficulty, or None at the top tier."""
+    # (mastery_threshold, min_evidence_count, min_qualifying_completions) for promoting OUT of current_difficulty, or None at the top tier.
     b = settings
     if current_difficulty == "easy":
         return (
@@ -116,8 +107,7 @@ def _log_mastery_change(
     old_mastery: float, new_mastery: float, quiz_evidence: float,
     old_difficulty: str, new_difficulty: str, confidence: float, trend_label: str,
 ) -> None:
-    # Deliberately excludes question text/selected answers -- only
-    # aggregate numbers, per the spec's requirement not to log that data.
+    # Deliberately excludes question text/selected answers -- only aggregate numbers get logged.
     scope = f"subject={subject}" if lesson is None else f"subject={subject} lesson={lesson}"
     logger.info(
         "Mastery updated: user=%s %s mastery=%.2f->%.2f quiz_evidence=%.2f "
@@ -178,9 +168,7 @@ async def get_subject_mastery_score(db: AsyncSession, user_id: int, subject: str
 
 
 async def get_subject_adaptive_summary(db: AsyncSession, user_id: int, subject: str) -> dict:
-    """mastery_score/confidence_score/trend_label for a subject, for the
-    challenge-zone generation profile and the Groq adaptive_context hint --
-    a single row fetch shared by both rather than querying twice."""
+    # mastery_score/confidence_score/trend_label for a subject, for the challenge-zone generation profile and the Groq adaptive_context hint -- a single row fetch shared by both.
     mastery = await _get_subject_mastery_row(db, user_id, subject)
     if mastery is None:
         return {"mastery_score": 50.0, "confidence_score": 0.0, "trend_label": "insufficient_data"}
@@ -192,20 +180,13 @@ async def get_subject_adaptive_summary(db: AsyncSession, user_id: int, subject: 
 
 
 async def get_subject_lesson_mastery_scores(db: AsyncSession, user_id: int, subject: str) -> dict[str, float]:
-    """lesson -> mastery_score for every lesson with a LessonMastery row in
-    this subject, for weak/moderate/strong lesson targeting during
-    automatic quiz generation."""
+    # lesson -> mastery_score for every lesson with a LessonMastery row in this subject, for weak/moderate/strong lesson targeting during automatic quiz generation.
     rows = await _get_all_lesson_mastery_rows(db, user_id, subject)
     return {row.lesson: row.mastery_score for row in rows}
 
 
 # ── History queries for retention / trend / transition evidence ─────────
-# Both of the following deliberately read through soft-deleted sessions
-# (no QuizSession.deleted_at filter) -- adaptive difficulty and quiz
-# generation are the "generation-critical" side of the existing soft-delete
-# split (see QuizSession.deleted_at's docstring / _get_recent_lessons in
-# quiz_service.py); only the user-facing analytics dashboard filters
-# deleted sessions out.
+# Both of the following deliberately read through soft-deleted sessions (no QuizSession.deleted_at filter) -- only the user-facing analytics dashboard filters deleted sessions out.
 
 async def _fetch_prior_fingerprint_timestamps(
     db: AsyncSession, *, user_id: int, session_id: int, session_created_at: datetime, fingerprints: set[str],
@@ -245,15 +226,7 @@ class _RecentCompletionRow:
 async def _fetch_recent_completions(
     db: AsyncSession, user_id: int, subject: str, limit: int, *, grade: int | None = None
 ) -> list[_RecentCompletionRow]:
-    # `grade` only restricts the result when a real grade is given -- the
-    # subject-level rollup (update_subject_mastery_after_submission) always
-    # omits it on purpose, since SubjectMastery deliberately blends every
-    # grade's lesson evidence together. The lesson-level caller
-    # (update_mastery_after_submission) passes its own `grade` here so a
-    # grade-scoped LessonMastery row's promotion/demotion trend isn't pulled
-    # from a different grade's history of a same-named lesson (e.g. Grade 10
-    # vs Grade 11 "Percentages"). A legacy/ungraded submission (grade=None)
-    # still gets the old unfiltered behavior, unchanged.
+    # `grade` only restricts the result when given -- the subject-level rollup omits it (SubjectMastery blends every grade together), while the lesson-level caller passes its own `grade` so a grade-scoped trend isn't pulled from a different grade's same-named lesson.
     filters = [QuizSession.user_id == user_id, QuizSession.subject == subject]
     if grade is not None:
         filters.append(QuizSession.grade == grade)
@@ -353,8 +326,7 @@ async def update_mastery_after_submission(
 
         accuracy = float(stats.get("accuracy", 0.0))
         lesson_answers = [a for a in graded_answers if a.lesson == lesson]
-        # A lesson's questions within one submission are generated at a
-        # single difficulty in practice, so the first answer is representative.
+        # A lesson's questions within one submission are generated at a single difficulty in practice, so the first answer is representative.
         lesson_difficulty = lesson_answers[0].difficulty if lesson_answers else DEFAULT_DIFFICULTY
 
         retention_evidence = engine.calculate_retention_evidence(
@@ -383,11 +355,7 @@ async def update_mastery_after_submission(
         )
         evidence_count_before = mastery.evidence_count
         mastery.mastery_score = engine.update_mastery_score(mastery.mastery_score, quiz_evidence, evidence_count_before)
-        # evidence_count counts QUESTIONS answered, not quizzes submitted --
-        # confidence's breakpoints ("0 questions -> 0%, 5 -> low, 15 ->
-        # moderate, 30+ -> high") are expressed in questions, and a
-        # question-count basis also keeps a 2-question 100% quiz from
-        # carrying as much weight as a 20-question one.
+        # evidence_count counts QUESTIONS answered, not quizzes submitted -- confidence's breakpoints are expressed in questions, keeping a 2-question quiz from carrying as much weight as a 20-question one.
         mastery.evidence_count = evidence_count_before + len(lesson_answers)
         mastery.confidence_score = engine.calculate_confidence(mastery.evidence_count)
         mastery.retention_score = retention_evidence
@@ -468,8 +436,7 @@ async def update_subject_mastery_after_submission(
     )
     evidence_count_before = mastery.evidence_count
     direct_mastery_score = engine.update_mastery_score(mastery.mastery_score, quiz_evidence, evidence_count_before)
-    # evidence_count counts QUESTIONS answered, not quizzes submitted --
-    # see the matching comment in update_mastery_after_submission.
+    # evidence_count counts QUESTIONS answered, not quizzes submitted -- see the matching comment in update_mastery_after_submission.
     mastery.evidence_count = evidence_count_before + len(graded_answers)
     mastery.confidence_score = engine.calculate_confidence(mastery.evidence_count)
     mastery.retention_score = retention_evidence
@@ -478,13 +445,7 @@ async def update_subject_mastery_after_submission(
         mastery.fluency_score = engine.update_mastery_score(mastery.fluency_score, quiz_fluency, evidence_count_before)
     mastery.last_mastery_update = now
 
-    # Roll up this subject's lessons (log-capped so one heavily-practiced
-    # lesson can't dominate) and blend with the direct quiz-evidence update
-    # above -- weighted towards the roll-up so lesson-level mastery carries
-    # more say than a bare subject accuracy figure, per spec. Falls back to
-    # the direct value alone when there's no lesson data yet (e.g. this
-    # submission's own lesson-level update, called separately, hasn't run
-    # or every lesson came back "unknown").
+    # Roll up this subject's lessons (log-capped) and blend with the direct quiz-evidence update above, weighted towards the roll-up; falls back to the direct value alone when there's no lesson data yet.
     lesson_rows = await _get_all_lesson_mastery_rows(db, user_id, subject)
     all_curriculum_lessons = (
         curriculum_service.lessons_for(session.grade, subject)
@@ -535,11 +496,7 @@ async def update_subject_mastery_after_submission(
 
 
 def describe_subject_mastery(mastery: SubjectMastery | None) -> dict:
-    # Read-only projection of a SubjectMastery row into the "how close to
-    # promotion/demotion" fields GET /analytics/me shows -- reuses the same
-    # helpers the real engine uses (_promotion_requirements,
-    # _demotion_threshold) so this can never drift from what actually
-    # drives promotion. Never writes to the DB.
+    # Read-only projection of a SubjectMastery row into the "how close to promotion/demotion" fields GET /analytics/me shows -- reuses the real engine's helpers so it can never drift. Never writes to the DB.
     current_difficulty = mastery.difficulty if mastery is not None else DEFAULT_DIFFICULTY
     consecutive_strong = mastery.consecutive_strong if mastery is not None else 0
     consecutive_weak = mastery.consecutive_weak if mastery is not None else 0

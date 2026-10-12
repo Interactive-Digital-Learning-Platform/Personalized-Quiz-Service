@@ -42,15 +42,11 @@ async def _get_owned_session(db: AsyncSession, user_id: int, session_id: int) ->
 
 
 async def create_retake_session(db: AsyncSession, clerk_id: str, session_id: int) -> QuizSession:
-    # "Restart Quiz" used to resubmit into the same session_id, which
-    # submit_quiz() rejects with 409 once that session already has a
-    # QuizCompletion — see the docstring on QuizSession.is_retake for why a
-    # fresh row (not a reset of the old one) is also what analytics needs.
+    # "Restart Quiz" used to resubmit into the same session_id, which submit_quiz() rejects with 409 once completed -- see QuizSession.is_retake's docstring for why a fresh row is what analytics needs.
     user = await get_or_create_user(db, clerk_id)
     source = await _get_owned_session(db=db, user_id=user.id, session_id=session_id)
 
-    # Chain to the original attempt, not the immediate parent, so retaking a
-    # retake doesn't build an ever-deepening chain.
+    # Chain to the original attempt, not the immediate parent, so retaking a retake doesn't build an ever-deepening chain.
     root_session_id = source.retake_of_session_id or source.id
 
     retake = QuizSession(
@@ -89,9 +85,7 @@ def _serialize_question(question: Question) -> dict:
 async def _get_recent_lessons(
     db: AsyncSession, user_id: int, subject: str, limit: int = 6
 ) -> list[str]:
-    # Lessons this user was recently quizzed on, most recent first — fed to
-    # generate_questions() as "please avoid these" so someone who just keeps
-    # hitting "generate" on the same subject still gets some topic variety.
+    # Lessons this user was recently quizzed on, most recent first — fed to generate_questions() as "please avoid these" for topic variety.
     stmt = (
         select(QuizSession.lesson)
         .where(QuizSession.user_id == user_id, QuizSession.subject == subject)
@@ -110,13 +104,7 @@ async def _get_recent_lessons(
 
 
 async def _get_existing_subject_questions(db: AsyncSession, subject: str, limit: int = 40) -> list[str]:
-    # A random sample of this subject's already-cached question bank, fed to
-    # the shuffle AI call as an explicit "avoid these" list -- the same
-    # mechanism generate_questions() already uses for normal quizzes
-    # (existing_texts_stmt in _generate_or_cache_tier), applied per subject
-    # here since Shuffle Mode covers several subjects in one combined
-    # prompt. Random rather than newest-first so repeated shuffle requests
-    # see a rotating slice of the bank instead of always the same one.
+    # A random sample of this subject's already-cached question bank, fed to the shuffle AI call as an "avoid these" list -- random rather than newest-first so repeated shuffle requests see a rotating slice.
     stmt = (
         select(Question.question)
         .where(Question.subject == subject)
@@ -151,9 +139,7 @@ def _jaccard_similarity(a: str, b: str) -> float:
 
 
 def _is_near_duplicate(candidate: str, existing: list[str], threshold: float = 0.55) -> bool:
-    # Two questions count as "the same" if they share 55%+ of their
-    # meaningful words (stop words and short filler words ignored) — catches
-    # Groq rephrasing a question it was already asked not to repeat.
+    # Two questions count as "the same" if they share 55%+ of their meaningful words -- catches Groq rephrasing a question it was already asked not to repeat.
     for ex in existing:
         if _jaccard_similarity(candidate, ex) >= threshold:
             return True
@@ -161,21 +147,12 @@ def _is_near_duplicate(candidate: str, existing: list[str], threshold: float = 0
 
 
 def _allocate_shuffle_subject_counts(subjects: list[str], total: int) -> dict[str, int]:
-    """Spreads `total` questions as evenly as possible across `subjects` for
-    Shuffle Mode. Differs from mastery_engine.allocate_question_counts()
-    (used for challenge-zone difficulty tiers) in that this randomizes WHICH
-    subjects get the leftover/extra questions and which subjects get picked
-    at all, so a shuffle quiz doesn't always favor the same subjects run
-    after run — allocate_question_counts()'s largest-remainder method is
-    deterministic by design, which is right for difficulty tiers but wrong
-    here.
-    """
+    # Spreads `total` questions as evenly as possible across `subjects` for Shuffle Mode; unlike mastery_engine.allocate_question_counts()'s deterministic largest-remainder method, this randomizes which subjects get leftovers/get picked at all, so a shuffle quiz doesn't always favor the same subjects.
     if total <= 0 or not subjects:
         return {}
 
     if len(subjects) > total:
-        # More subjects than questions requested — only `total` subjects
-        # get to participate at all, one question each, chosen at random.
+        # More subjects than questions requested — only `total` subjects get to participate, one question each, chosen at random.
         chosen = random.sample(subjects, total)
         return {subject: 1 for subject in chosen}
 
@@ -189,15 +166,7 @@ def _allocate_shuffle_subject_counts(subjects: list[str], total: int) -> dict[st
     return {subject: count for subject, count in counts.items() if count > 0}
 
 
-# Buckets currently being topped up in the background, keyed by
-# (subject, difficulty, grade) -- an in-process debounce so several
-# concurrent requests hitting the same low bucket don't each spawn their own
-# top-up task. Good enough given this service defaults to a single uvicorn
-# worker (WEB_CONCURRENCY=1); a duplicate top-up across workers would just be
-# a wasted Groq call, never a correctness problem, so no cross-process lock.
-# Keyed by grade too -- Grade 10 and Grade 11 buckets for the same
-# subject+difficulty are otherwise indistinguishable here, and one grade's
-# in-flight top-up would wrongly debounce the other's.
+# Buckets currently being topped up in the background, keyed by (subject, difficulty, grade) -- an in-process debounce so concurrent requests don't each spawn their own top-up task; no cross-process lock needed since this service is single-worker.
 _replenishing_buckets: set[tuple[str, str, int]] = set()
 
 
@@ -212,24 +181,7 @@ async def _fetch_pool_questions(
     exclude_ids: set[int],
     exclude_texts: list[str],
 ) -> list[Question]:
-    """Primary read path for quiz generation: pre-generated questions for
-    this (subject, difficulty, grade) pool that `user_id` hasn't already
-    been asked (via a QuestionAttempt/QuizSession join), so a request only
-    needs to call Groq for whatever this doesn't cover. Over-fetches (3x
-    `limit`) because some candidates get dropped by the near-duplicate check
-    against `exclude_texts`, same pattern as the old fallback query this
-    replaces.
-
-    Scoped to `grade` (not just subject+difficulty) and, when `grade` has
-    curriculum data (see curriculum_service), to that grade's exact lesson
-    list -- otherwise a Grade 10 request could be served a Grade 11 (or
-    legacy pre-curriculum, grade=NULL) pool question whose lesson doesn't
-    exist in either grade's syllabus.
-
-    Also triggers a debounced, fire-and-forget background top-up
-    (see _kickoff_pool_replenish) whenever this bucket is running low --
-    never blocks this read on that.
-    """
+    # Primary read path for quiz generation: pre-generated questions for this (subject, difficulty, grade) pool that `user_id` hasn't already been asked, so a request only calls Groq for the shortfall; over-fetches 3x `limit` for near-duplicate filtering, scoped to `grade`'s curriculum lesson list where available, and triggers a debounced background top-up when the bucket runs low.
     if limit <= 0:
         return []
 
@@ -279,9 +231,7 @@ async def _fetch_pool_questions(
 
 
 def _kickoff_pool_replenish(subject: str, difficulty: str, grade: int) -> None:
-    # A thin, easily-mockable wrapper around asyncio.create_task -- tests
-    # patch this directly so they never spawn a real background Groq call
-    # against a DB session/event loop the test has already torn down.
+    # A thin, easily-mockable wrapper around asyncio.create_task -- tests patch this directly so they never spawn a real background Groq call.
     key = (subject, difficulty, grade)
     if key in _replenishing_buckets:
         return
@@ -290,11 +240,7 @@ def _kickoff_pool_replenish(subject: str, difficulty: str, grade: int) -> None:
 
 
 async def _replenish_pool_task(subject: str, difficulty: str, grade: int) -> None:
-    """Runs after the triggering request has already returned its response
-    -- opens its own DB session (AsyncSessionLocal) since the request-scoped
-    session is closed by then. Never lets a failure here surface anywhere;
-    it's fully decoupled from any user-facing request/response.
-    """
+    # Runs after the triggering request has already returned its response -- opens its own DB session since the request-scoped one is closed by then; fully decoupled from any user-facing request/response.
     key = (subject, difficulty, grade)
     try:
         async with AsyncSessionLocal() as session:
@@ -309,13 +255,7 @@ async def _replenish_pool_task(subject: str, difficulty: str, grade: int) -> Non
                 return
 
             batch_size = min(needed, settings.POOL_TOPUP_MAX_BATCH)
-            # Curriculum-backed grades (10/11) must only ever top up the pool
-            # with questions pinned to a real syllabus lesson -- without this,
-            # every background-generated pool question fell back to
-            # generate_questions()'s free-text random-lesson path regardless
-            # of curriculum, which is how off-syllabus lessons were leaking
-            # into "Auto (AI picks)" quizzes even though the live per-request
-            # generation path already constrained to lesson_choices correctly.
+            # Curriculum-backed grades (10/11) must only ever top up the pool with questions pinned to a real syllabus lesson, to stop off-syllabus lessons leaking into "Auto (AI picks)" quizzes.
             lesson_choices = (
                 curriculum_service.lessons_for(grade, subject)
                 if curriculum_service.has_curriculum(grade)
@@ -366,19 +306,7 @@ async def _fetch_shuffle_fallback_questions(
     exclude_ids: set[int],
     exclude_texts: list[str],
 ) -> list[Question]:
-    """Blind DB-cache fallback -- the final safety net once both the
-    per-user-aware pool read (_fetch_pool_questions) and a live Groq call
-    have already been tried for a subject and it's still short. Scoped to
-    `grade` (and, where curriculum data exists, that grade's lesson list per
-    subject) for the same reason as _fetch_pool_questions -- otherwise this
-    last-resort fallback could hand back a Grade 11 or legacy off-syllabus
-    question for a Grade 10 request. `difficulties=None` means "any
-    difficulty for these subjects". Deliberately does NOT filter by per-user
-    attempt history (unlike the pool read) -- as a last resort, repeating a
-    question beats returning fewer than requested. Over-fetches (3x `limit`)
-    because some candidates get dropped by the near-duplicate check against
-    `exclude_texts`.
-    """
+    # Blind DB-cache fallback -- the final safety net once both the pool read and a live Groq call have already been tried and it's still short; scoped to `grade`'s curriculum lesson list like _fetch_pool_questions, but deliberately doesn't filter by per-user attempt history since as a last resort a repeat beats returning fewer than requested.
     if limit <= 0 or not subjects:
         return []
 
@@ -417,8 +345,7 @@ async def _fetch_shuffle_fallback_questions(
 
 @dataclass
 class _ShuffleSubjectOutcome:
-    # Purely for structured logging/debugging of one shuffle quiz's AI
-    # phase -- never persisted.
+    # Purely for structured logging/debugging of one shuffle quiz's AI phase -- never persisted.
     subject: str
     requested: int
     ai_generated: int
@@ -443,12 +370,7 @@ async def get_or_create_user(db: AsyncSession, clerk_id: str) -> User:
 
 @dataclass
 class _CallBudget:
-    # Shared, mutable across every tier of one generate_quiz() request — a
-    # challenge-zone quiz calls _generate_or_cache_tier() once per difficulty
-    # tier, and each of those independently runs a dedup-retry loop, so
-    # without a shared cap a single "generate quiz" tap could fire off far
-    # more Groq calls than a user action should ever cost (and did: this is
-    # what was tripping Groq's 429 rate limit before this budget existed).
+    # Shared, mutable across every tier of one generate_quiz() request -- without a shared cap, a single "generate quiz" tap could fire off far more Groq calls than it should (this used to trip Groq's 429 rate limit).
     remaining: int
 
     def consume(self) -> bool:
@@ -477,30 +399,7 @@ async def _generate_or_cache_tier(
     reference_snippets: list[str] | None = None,
     reference_by_lesson: dict[str, list[str]] | None = None,
 ) -> tuple[list[Question], bool, bool, bool, int, int, str | None]:
-    """Generates (or falls back to cached) `question_count` questions at one
-    subject+difficulty tier — pool-first/AI-for-the-shortfall/blind-cache-
-    as-last-resort, factored out so a challenge-zone quiz can call it once
-    per difficulty tier. `subject` is passed explicitly (rather than read
-    from `payload.subject`) so a challenge-zone tier can vary difficulty per
-    call while everything else about payload stays the same. `seen_texts` is
-    both read (as prior questions to avoid) and appended to in place, so
-    multiple tiers in one quiz share a single cross-tier dedup pool instead
-    of only deduping within each tier.
-
-    `reference_snippets`/`reference_by_lesson` are RAG grounding excerpts
-    (see app/services/rag_service.py) computed ONCE per subject by the
-    caller (generate_quiz()) rather than per tier -- a challenge-zone quiz's
-    tiers all share the same subject, so re-querying Qdrant per tier would
-    just repeat the same retrieval for no benefit. Both default to None and
-    are passed straight through to generate_questions() unchanged.
-
-    An explicit lesson pin (`lesson is not None`) skips the pool entirely
-    and keeps the old AI-first-then-blind-cache behavior unchanged — the
-    pool's granularity is (subject, difficulty) only.
-
-    Returns (questions, cache_hit, ai_failed, ai_succeeded,
-    generation_calls_made, duplicate_count, error_category).
-    """
+    # Generates (or falls back to cached) `question_count` questions at one subject+difficulty tier — pool-first/AI-for-the-shortfall/blind-cache-as-last-resort, factored out so a challenge-zone quiz can call it once per tier; `seen_texts` is shared across tiers for cross-tier dedup, `reference_snippets`/`reference_by_lesson` are RAG excerpts computed once per subject by the caller, and an explicit lesson pin skips the pool entirely. Returns (questions, cache_hit, ai_failed, ai_succeeded, generation_calls_made, duplicate_count, error_category).
     exclude_ids: list[int] = payload.excluded_question_ids or []
     picked_ids: set[int] = set(exclude_ids)
 
@@ -511,29 +410,21 @@ async def _generate_or_cache_tier(
     duplicate_count = 0
     error_category: str | None = None
 
-    # Only meaningful when lesson isn't already pinned — a pinned lesson has
-    # already been validated/normalized against the curriculum in the
-    # request schema, so there's nothing left to constrain here. None for
-    # grades without curriculum data, preserving the old free-text behavior.
+    # Only meaningful when lesson isn't already pinned — a pinned lesson is already validated/normalized against the curriculum in the request schema. None for grades without curriculum data.
     lesson_choices = (
         curriculum_service.lessons_for(payload.grade, subject) or None
         if lesson is None and curriculum_service.has_curriculum(payload.grade)
         else None
     )
 
-    # Scoped to grade (and, when lesson isn't pinned and curriculum data
-    # exists, to that grade's exact lesson list) so the blind final fallback
-    # below can never hand back a different grade's question or a
-    # legacy/off-syllabus lesson -- same reasoning as _fetch_pool_questions.
+    # Scoped to grade (and, where curriculum data exists, that grade's lesson list) so the blind final fallback below can never hand back a different grade's or off-syllabus question -- same reasoning as _fetch_pool_questions.
     base_filter = [Question.subject == subject, Question.difficulty == difficulty, Question.grade == payload.grade]
     if lesson is not None:
         base_filter.append(Question.lesson == lesson)
     elif lesson_choices:
         base_filter.append(Question.lesson.in_(lesson_choices))
 
-    # ── Pool-first: read whatever this user hasn't already been asked out
-    # of the pre-generated pool before ever calling Groq. Never calls Groq
-    # itself, so this runs regardless of `force_cache`.
+    # ── Pool-first: read whatever this user hasn't already been asked out of the pre-generated pool before ever calling Groq. Runs regardless of `force_cache`.
     if lesson is None:
         pool_questions = await _fetch_pool_questions(
             db,
@@ -560,10 +451,7 @@ async def _generate_or_cache_tier(
             existing_texts_stmt = select(Question.question).where(*existing_texts_filter)
             existing_texts: list[str] = list((await db.execute(existing_texts_stmt)).scalars().all())
 
-            # Ask Groq for questions, drop any that are near-duplicates of
-            # ones we already have, and if we're short, ask again for just
-            # the remainder — up to 3 rounds. Keeps whatever unique set we
-            # end up with even if a narrow topic can't fill the full count.
+            # Ask Groq for questions, drop near-duplicates, and if short, ask again for the remainder — up to 3 rounds, keeping whatever unique set results even if a narrow topic can't fill the full count.
             needed = remaining
             deduped_ai: list[dict] = []
             local_seen = seen_texts + existing_texts
@@ -631,10 +519,7 @@ async def _generate_or_cache_tier(
                 )
                 generation_calls_made += 1
             else:
-                # Budget exhausted before this tier got anything from AI at
-                # all — treat it the same as an AI failure so this tier
-                # falls back to cache instead of silently returning zero
-                # questions.
+                # Budget exhausted before this tier got anything from AI at all — treat it the same as an AI failure so this tier falls back to cache.
                 raise HTTPException(
                     status_code=status.HTTP_502_BAD_GATEWAY,
                     detail="Generation call budget exhausted for this request.",
@@ -665,15 +550,10 @@ async def _generate_or_cache_tier(
             ai_failed = True
             error_category = telemetry_service.categorize_generation_error(exc)
 
-    # ── Blind final fallback: whatever's still short after pool + AI,
-    # ignoring per-user attempt history (a repeat beats returning fewer
-    # questions than requested).
+    # ── Blind final fallback: whatever's still short after pool + AI, ignoring per-user attempt history (a repeat beats returning fewer questions than requested).
     remaining = question_count - len(questions)
     if remaining > 0:
-        # Set True as soon as a fallback is needed at all (not gated on it
-        # actually finding rows) — matches the pre-pool contract where
-        # `used_cache_fallback` telemetry reflects "AI alone couldn't cover
-        # this", even on the (rarer) occasion the cache itself is empty too.
+        # Set True as soon as a fallback is needed at all (not gated on it actually finding rows) — matches the pre-pool "AI alone couldn't cover this" telemetry contract.
         cache_hit = True
 
         fallback_filter = list(base_filter)
@@ -693,11 +573,7 @@ async def _generate_or_cache_tier(
             questions.extend(fallback_questions)
             seen_texts.extend(q.question for q in fallback_questions)
 
-        # Deliberately NOT raised here — the caller aggregates cache_hit/
-        # ai_failed across every tier first (a challenge-zone quiz calls
-        # this per tier) and raises itself once that's done, so telemetry
-        # always reflects the full picture even when an earlier tier
-        # already succeeded before a later one hit this.
+        # Deliberately NOT raised here — the caller aggregates cache_hit/ai_failed across every tier first and raises itself once that's done, so telemetry reflects the full picture.
         logger.info(
             "Served from DB cache: subject=%s, lesson=%s, difficulty=%s — %d questions (ai_failed=%s, force=%s)",
             subject, lesson or "<any>", difficulty, len(fallback_questions), ai_failed, force_cache,
@@ -715,19 +591,7 @@ async def _generate_shuffle_quiz_questions(
     user: User,
     telemetry_counts: dict,
 ) -> tuple[list[Question], bool, bool, int, int, str | None]:
-    """Shuffle Mode's generation pipeline: read each subject's pool first
-    (per-user-aware, no Groq call), then ONE Groq call covering only
-    whatever's still short across subjects (see
-    groq_service.generate_shuffle_quiz_questions), each subject at its own
-    current adaptive difficulty, then a blind DB-cache top-up for whatever
-    even that didn't cover. Only ever raises if, after all of that, the
-    quiz still can't reach payload.question_count.
-
-    Returns (questions, cache_hit, ai_succeeded, generation_calls_made,
-    duplicate_count, error_category) -- the shape generate_quiz()'s
-    non-shuffle loop already produces, so the two call sites drop in
-    interchangeably.
-    """
+    # Shuffle Mode's generation pipeline: read each subject's pool first (no Groq call), then ONE Groq call covering only whatever's still short, each subject at its own adaptive difficulty, then a blind DB-cache top-up; only raises if the quiz still can't reach payload.question_count. Returns (questions, cache_hit, ai_succeeded, generation_calls_made, duplicate_count, error_category) -- the same shape generate_quiz()'s non-shuffle loop produces.
     subjects = payload.subjects or []
     subject_counts = _allocate_shuffle_subject_counts(subjects, payload.question_count)
     selected_subjects = list(subject_counts)
@@ -755,9 +619,7 @@ async def _generate_shuffle_quiz_questions(
     error_category: str | None = None
     deficit: dict[str, int] = {subject: count for subject, _, count in subject_plan}
 
-    # ── Pool phase: read each subject's (subject, difficulty) pool first,
-    # excluding whatever this user has already been asked. Never calls
-    # Groq, so this runs regardless of payload.force_cache.
+    # ── Pool phase: read each subject's (subject, difficulty) pool first, excluding whatever this user has already been asked. Runs regardless of payload.force_cache.
     for subject, difficulty, _count in subject_plan:
         remaining = deficit.get(subject, 0)
         if remaining <= 0:
@@ -786,9 +648,7 @@ async def _generate_shuffle_quiz_questions(
         payload.question_count, pool_question_count, total_deficit,
     )
 
-    # ── AI phase: one batched Groq call covering only the subjects (and
-    # counts) still short after the pool phase. payload.force_cache (the
-    # "Use Cache" retry after a prior AI failure) skips this phase entirely.
+    # ── AI phase: one batched Groq call covering only the subjects/counts still short after the pool phase. payload.force_cache skips this phase entirely.
     if not payload.force_cache and total_deficit > 0:
         ai_subject_plan = [
             (subject, difficulty, deficit[subject])
@@ -807,12 +667,7 @@ async def _generate_shuffle_quiz_questions(
             if curriculum_service.has_curriculum(payload.grade)
             else {}
         )
-        # RAG grounding excerpts (app/services/rag_service.py), fanned out
-        # across every subject in this shuffle batch that has a curriculum
-        # lesson list -- bounded by ONE combined cap across the whole batch
-        # (RAG_MAX_LESSON_QUERIES_SHUFFLE) rather than per-subject, so a
-        # many-subject shuffle can't multiply its retrieval fan-out.
-        # Best-effort: never raises, empty on any failure.
+        # RAG grounding excerpts (app/services/rag_service.py), fanned out across every subject with a curriculum lesson list, bounded by ONE combined cap (RAG_MAX_LESSON_QUERIES_SHUFFLE) so a many-subject shuffle can't multiply its retrieval fan-out. Best-effort: never raises, empty on any failure.
         reference_by_lesson_by_subject = await rag_service.get_snippets_by_lesson_for_subjects(
             grade=payload.grade,
             subjects_lessons={s: lesson_choices_by_subject[s] for s in ai_subjects if lesson_choices_by_subject.get(s)},
@@ -838,9 +693,7 @@ async def _generate_shuffle_quiz_questions(
                     continue
                 subject = q_data["subject"]
                 if deficit.get(subject, 0) <= 0:
-                    # Already have enough for this subject -- an extra
-                    # question the AI over-produced for it doesn't displace
-                    # another subject's allocation.
+                    # Already have enough for this subject -- an extra question the AI over-produced doesn't displace another subject's allocation.
                     continue
                 question = Question(
                     question=q_text,
@@ -861,8 +714,7 @@ async def _generate_shuffle_quiz_questions(
             error_category = telemetry_service.categorize_generation_error(exc)
             ai_failed = True
             logger.warning("Shuffle AI generation failed: %s", exc.detail)
-            # Deliberately not re-raised -- falls through to the DB
-            # fallback below instead of failing the whole request.
+            # Deliberately not re-raised -- falls through to the DB fallback below instead of failing the whole request.
 
     ai_question_count = len(generated) - pool_question_count
     total_deficit = sum(max(0, d) for d in deficit.values())
@@ -871,8 +723,7 @@ async def _generate_shuffle_quiz_questions(
         payload.question_count, pool_question_count, ai_question_count, total_deficit,
     )
 
-    # AI-created questions need a flush before their `.id` can be used to
-    # exclude them from the DB-fallback queries below.
+    # AI-created questions need a flush before their `.id` can be used to exclude them from the DB-fallback queries below.
     await db.flush()
     used_ids.update(q.id for q in generated)
 
@@ -897,10 +748,7 @@ async def _generate_shuffle_quiz_questions(
         cache_hit = True
         deficit[subject] -= len(fallback)
 
-    # ── DB fallback #2: global across every selected shuffle subject ─────
-    # Covers both "any shuffle subject" and "rebalance onto subjects that
-    # already succeeded" -- unrestricted by subject or prior outcome, so a
-    # single fetch here naturally does both.
+    # ── DB fallback #2: global across every selected shuffle subject ───── Covers both "any shuffle subject" and "rebalance onto subjects that already succeeded" in one unrestricted fetch.
     total_deficit = sum(max(0, d) for d in deficit.values())
     if total_deficit > 0:
         global_fallback = await _fetch_shuffle_fallback_questions(
@@ -952,23 +800,11 @@ async def generate_quiz(
     clerk_id: str,
     payload: GenerateQuizRequest,
 ) -> tuple[QuizSession, list[Question], bool, str, str]:
-    # AI-first: every request calls Groq for a fresh set of questions, so a
-    # quiz is never silently served from the DB unless AI generation actually
-    # fails (or the caller explicitly asks for the cached fallback via
-    # force_cache, e.g. after already seeing an AI failure once).
-    #
-    # The caller only has to send subject + question_count. Lesson and
-    # difficulty are both picked automatically: lesson defaults to "let the
-    # AI assign a different random lesson per question" rather than pinning
-    # the whole quiz to one topic; difficulty comes from the user's accuracy
-    # history via difficulty_service, tracked independently per subject (or
-    # per subject+lesson if a lesson override was given).
+    # AI-first: every request calls Groq for a fresh set of questions, so a quiz is never silently served from the DB unless AI generation fails or the caller explicitly asks for force_cache. The caller only has to send subject + question_count -- lesson defaults to a per-question random pick, and difficulty comes from the user's accuracy history via difficulty_service.
     start_time = time.monotonic()
     user = await get_or_create_user(db, clerk_id)
 
-    # Shuffle bypasses lesson/difficulty overrides entirely — each subject in
-    # the shuffle always uses its own current adaptive difficulty, so there's
-    # nothing to pin a lesson override onto.
+    # Shuffle bypasses lesson/difficulty overrides entirely — each subject always uses its own current adaptive difficulty.
     lesson: str | None = None if payload.shuffle else payload.lesson
     preferred_lessons: list[str] | None = None
     adaptive_context: str | None = None
@@ -978,20 +814,12 @@ async def generate_quiz(
         ", ".join(payload.subjects) if payload.shuffle and payload.subjects else (payload.subject or "unknown")
     )
 
-    # subject_tier_plan is (subject, difficulty, question_count) — the unit
-    # _generate_or_cache_tier() is called once per entry for. A normal quiz
-    # has 1+ entries all sharing payload.subject (1 unless challenge-zone
-    # difficulty-mixing splits it into several difficulty tiers). Shuffle
-    # quizzes don't use this at all — they run through the dedicated
-    # _generate_shuffle_quiz_questions() pipeline below instead (its own
-    # sequential-with-fallback logic, distinct enough from the single-
-    # subject tier loop that sharing subject_tier_plan wasn't worth it).
+    # subject_tier_plan is (subject, difficulty, question_count) — the unit _generate_or_cache_tier() is called once per entry for; a normal quiz has 1+ entries sharing payload.subject, while Shuffle quizzes run through the separate _generate_shuffle_quiz_questions() pipeline instead.
     subject_tier_plan: list[tuple[str, str, int]] = []
     challenge_zone_active = False
 
     if payload.shuffle:
-        # Overwritten by the Mixed-difficulty detection below once
-        # `questions` is populated -- harmless placeholder until then.
+        # Overwritten by the Mixed-difficulty detection below once `questions` is populated -- harmless placeholder until then.
         difficulty = difficulty_service.DEFAULT_DIFFICULTY
     else:
         subject = payload.subject
@@ -1003,16 +831,7 @@ async def generate_quiz(
             else await difficulty_service.get_subject_difficulty(db, user.id, subject)
         )
 
-        # Challenge zone + weak-lesson targeting: only for the fully-automatic
-        # path (no explicit lesson pin, no explicit difficulty override) — an
-        # explicit override of either bypasses adaptive generation entirely,
-        # exactly as before. When active, this spreads the quiz's questions
-        # across 2-3 difficulty tiers (see
-        # difficulty_mastery_engine.CHALLENGE_ZONE_DISTRIBUTION) instead of one,
-        # and nudges the AI toward the subject's weakest lessons — but the
-        # underlying per-tier generation/cache-fallback logic
-        # (_generate_or_cache_tier) is exactly the single-difficulty path this
-        # always used, just called once per tier instead of once total.
+        # Challenge zone + weak-lesson targeting: only for the fully-automatic path (no explicit lesson pin or difficulty override); when active, spreads the quiz across 2-3 difficulty tiers (see CHALLENGE_ZONE_DISTRIBUTION) and nudges the AI toward the subject's weakest lessons, reusing the same single-difficulty per-tier logic just called once per tier.
         challenge_zone_active = lesson is None and payload.difficulty is None
         tier_plan: list[tuple[str, int]] = [(difficulty, payload.question_count)]
 
@@ -1035,11 +854,7 @@ async def generate_quiz(
 
         subject_tier_plan = [(subject, tier_difficulty, tier_count) for tier_difficulty, tier_count in tier_plan]
 
-        # RAG grounding excerpts (app/services/rag_service.py) -- computed
-        # ONCE per subject here rather than per tier in
-        # _generate_or_cache_tier(), since every tier in subject_tier_plan
-        # shares the same subject/lesson. Best-effort: never raises, empty
-        # on any failure/timeout/disabled-RAG/no-results.
+        # RAG grounding excerpts (app/services/rag_service.py) -- computed ONCE per subject here rather than per tier, since every tier in subject_tier_plan shares the same subject/lesson. Best-effort: never raises, empty on any failure.
         if lesson is not None:
             reference_snippets = await rag_service.get_snippets_for_lesson(
                 grade=payload.grade, subject=subject, lesson=lesson,
@@ -1058,9 +873,7 @@ async def generate_quiz(
                     max_lessons=settings.RAG_MAX_LESSON_QUERIES,
                 )
             else:
-                # No curriculum data for this grade -- no fixed lesson list
-                # to query per-lesson, so fall back to one subject-level
-                # broad query for general grounding material instead.
+                # No curriculum data for this grade -- no fixed lesson list to query per-lesson, so fall back to one subject-level broad query.
                 reference_snippets = await rag_service.get_snippets_for_lesson(
                     grade=payload.grade, subject=subject, lesson=subject,
                     max_snippets=settings.RAG_SNIPPETS_PER_LESSON,
@@ -1071,9 +884,7 @@ async def generate_quiz(
     ai_succeeded = False
     questions: list[Question] = []
 
-    # Telemetry is recorded in the `finally` block below no matter how this
-    # function exits, purely for internal monitoring — it never affects what
-    # gets returned to the caller.
+    # Telemetry is recorded in the `finally` block below no matter how this function exits, purely for internal monitoring — it never affects what gets returned to the caller.
     created_session_id: int | None = None
     error_category: str | None = None
     generation_calls_made = 0
@@ -1089,8 +900,7 @@ async def generate_quiz(
                 db, payload=payload, user=user, telemetry_counts=telemetry_counts,
             )
         else:
-            # Cached per subject so a challenge-zone quiz (several tiers,
-            # same subject) still only fetches this once.
+            # Cached per subject so a challenge-zone quiz (several tiers, same subject) still only fetches this once.
             recent_lessons_by_subject: dict[str, list[str]] = {}
 
             async def _recent_lessons_for(subj: str) -> list[str]:
@@ -1115,16 +925,7 @@ async def generate_quiz(
                     lesson=lesson,
                     difficulty=tier_difficulty,
                     question_count=tier_count,
-                    # A challenge-zone quiz's tiers are all the SAME subject,
-                    # so once one difficulty tier's AI call genuinely failed,
-                    # cascading that onto later tiers is a reasonable
-                    # shortcut -- more Groq calls for the same subject
-                    # probably won't fare better. Deliberately keyed off
-                    # `ai_failed` (a real AI failure), not `cache_hit` --
-                    # under pool-first generation, cache_hit now goes True
-                    # far more often (any tier the pool alone could satisfy),
-                    # and that alone shouldn't force every later tier to
-                    # skip AI too.
+                    # A challenge-zone quiz's tiers are all the SAME subject, so once one tier's AI call genuinely failed, cascading that onto later tiers is a reasonable shortcut; deliberately keyed off `ai_failed`, not `cache_hit`, since pool-first generation makes cache_hit go True far more often without meaning AI should be skipped.
                     force_cache=payload.force_cache or ai_failed,
                     recent_lessons=await _recent_lessons_for(tier_subject),
                     seen_texts=seen_texts,
@@ -1136,11 +937,7 @@ async def generate_quiz(
                     reference_by_lesson=reference_by_lesson,
                 )
                 questions.extend(tier_questions)
-                # A challenge-zone quiz spans several tiers — if ANY of them
-                # had to fall back to cache, or ANY of them got fresh AI
-                # questions, that's still worth reflecting in the aggregate
-                # flags returned to the caller/telemetry, rather than only
-                # reflecting the last tier processed.
+                # A challenge-zone quiz spans several tiers — if ANY fell back to cache or got fresh AI questions, that's worth reflecting in the aggregate flags, not just the last tier processed.
                 cache_hit = cache_hit or tier_cache_hit
                 ai_failed = ai_failed or tier_ai_failed
                 ai_succeeded = ai_succeeded or tier_ai_succeeded
@@ -1155,15 +952,7 @@ async def generate_quiz(
                         detail="AI question generation failed and no cached questions are available for this topic yet.",
                     )
 
-        # `difficulty` above is only the fallback single-tier value; for a
-        # challenge-zone or shuffle quiz whose questions actually ended up
-        # spanning more than one difficulty, reflect that on the session the
-        # same way session_lesson/session_subject already become "Mixed"
-        # when they vary. QuestionAttempt/analytics always read each
-        # question's own Question.difficulty regardless, so this is
-        # cosmetic/summary only. For shuffle specifically, `difficulty` was
-        # only ever a placeholder before this point (each subject picks its
-        # own), so this is also where its real value is first derived.
+        # `difficulty` above is only the fallback single-tier value; for a quiz spanning more than one difficulty, reflect that as "Mixed" the same way session_lesson/session_subject do -- purely cosmetic/summary since QuestionAttempt/analytics always read each question's own Question.difficulty.
         if payload.shuffle or len(subject_tier_plan) > 1:
             distinct_tier_difficulties = {q.difficulty for q in questions}
             if len(distinct_tier_difficulties) > 1:
@@ -1203,11 +992,7 @@ async def generate_quiz(
         await db.refresh(session)
         created_session_id = session.id
 
-        # No per-question refresh here on purpose — every Question object
-        # already has its id (from the flush()'s RETURNING clause, or from
-        # the cache SELECT), so refreshing each one individually would just
-        # be an extra DB round-trip per question for no benefit. That used to
-        # add several seconds per quiz over Neon's network latency.
+        # No per-question refresh here on purpose — every Question already has its id (from flush()'s RETURNING clause or the cache SELECT), so refreshing individually would just add an extra DB round-trip per question.
 
         logger.info(
             "Created QuizSession id=%d for user=%d with %d questions at lesson=%s, difficulty=%s",
@@ -1220,11 +1005,7 @@ async def generate_quiz(
             error_category = telemetry_service.categorize_generation_error(exc)
         raise
     finally:
-        # record_generation_event() already catches its own errors, but this
-        # gets a second safety net too — an exception raised inside a
-        # `finally` block replaces whatever this function was about to
-        # return/raise, so telemetry must never be allowed to blow up the
-        # actual request even in a freak case its own handling misses.
+        # record_generation_event() already catches its own errors, but this is a second safety net -- an exception in a `finally` block replaces whatever this function was about to return/raise.
         try:
             latency_ms = (time.monotonic() - start_time) * 1000.0
             await telemetry_service.record_generation_event(
@@ -1271,9 +1052,7 @@ async def submit_quiz(
     clerk_id: str,
     payload: SubmitQuizRequest,
 ) -> dict:
-    # Grading happens entirely server-side — the frontend only ever sends
-    # what the user picked, never the correct answers, so there's nothing to
-    # tamper with client-side.
+    # Grading happens entirely server-side — the frontend only ever sends what the user picked, never the correct answers, so there's nothing to tamper with client-side.
     user = await get_or_create_user(db, clerk_id)
 
     session = await _get_owned_session(db=db, user_id=user.id, session_id=payload.session_id)
@@ -1407,25 +1186,7 @@ async def submit_quiz(
         session.id, correct_count, total_questions, accuracy, total_time,
     )
 
-    # Feed this result back into adaptive difficulty — lesson-level first
-    # (for the explicit-lesson-override flow), then subject-level (what
-    # actually drives the default quiz flow), since the subject-level
-    # update rolls up the just-updated LessonMastery rows and needs them
-    # to be current. Non-critical: never let this fail the submission
-    # response itself.
-    #
-    # A shuffle submission's graded_answers span multiple subjects — grouping
-    # here before calling the update functions means each subject only ever
-    # sees its own slice of answers/breakdown, never another subject's. For a
-    # normal single-subject submission this loop runs exactly once, over the
-    # same data the direct (un-grouped) calls used before, so behavior there
-    # is unchanged.
-    # Retakes are graded and persisted like any other submission (so the
-    # user still sees their score and the 409 "already completed" guard
-    # above still protects against double-submitting the same retake), but
-    # they must never move adaptive difficulty — the user has already seen
-    # every correct answer by the time they retake, so an inflated retake
-    # score would just teach the difficulty engine the wrong thing.
+    # Feed this result back into adaptive difficulty — lesson-level first, then subject-level (which rolls up the just-updated LessonMastery rows), non-critical so it never fails the submission response. Grouped by subject since a shuffle submission's graded_answers span multiple subjects. Retakes are graded/persisted normally but must never move adaptive difficulty, since the user has already seen every correct answer.
     if not session.is_retake:
         answers_by_subject: dict[str, list[difficulty_service.GradedAnswer]] = defaultdict(list)
         for graded_answer in graded_answers:
@@ -1460,11 +1221,7 @@ async def submit_quiz(
         except Exception as exc:  # noqa: BLE001 — non-critical side-effect, must never fail the submission response
             logger.error("Difficulty mastery update failed (non-critical): %s", exc)
 
-        # Separate try/except from the CEWM update above — BKT is an
-        # independent read-only signal, so a failure here shouldn't skip
-        # the difficulty-driving update above, and vice versa. Handles all
-        # subjects/lessons in graded_answers itself (no per-subject
-        # grouping needed, unlike the CEWM calls above).
+        # Separate try/except from the CEWM update above — BKT is an independent read-only signal, so a failure here shouldn't skip the difficulty-driving update above, and vice versa.
         try:
             await bkt_service.update_bkt_after_submission(
                 db=db, user_id=user.id, grade=session.grade, graded_answers=graded_answers,
@@ -1487,9 +1244,7 @@ async def submit_quiz(
         "repeated_wrong_count": repeated_wrong_count,
         "repeated_lessons_right": sorted(repeated_lessons_right),
         "repeated_lessons_wrong": sorted(repeated_lessons_wrong),
-        # Not part of SubmitQuizResponse — routes/quiz.py pops this before
-        # building the response, it's only there to tell the caller whether
-        # to skip the post-submit analytics recompute.
+        # Not part of SubmitQuizResponse — routes/quiz.py pops this before building the response; it only tells the caller whether to skip the post-submit analytics recompute.
         "is_retake": session.is_retake,
     }
 

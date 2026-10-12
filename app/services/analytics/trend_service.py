@@ -17,8 +17,11 @@ class TrendAnalyticsService:
         self.overall_session_stats: dict[int, dict[str, int]] = {}
         self.subject_session_stats: dict[str, dict[int, dict[str, int]]] = {}
         self.topic_session_stats: dict[tuple[str, str], dict[int, dict[str, int]]] = {}
+        # Distinct question subjects per session -- a Shuffle session spans several, labelled "Mixed" in accuracy_history().
+        self._session_subjects: dict[int, set[str]] = {}
 
         for row in trend_attempt_rows:
+            self._session_subjects.setdefault(row.session_id, set()).add(row.subject)
             self._bump(self.overall_session_stats, row.session_id, row.correct)
             self._bump(self.subject_session_stats.setdefault(row.subject, {}), row.session_id, row.correct)
             self._bump(
@@ -42,3 +45,22 @@ class TrendAnalyticsService:
             change_threshold=settings.ANALYTICS_TREND_CHANGE_THRESHOLD,
             now=self._now,
         )
+
+    def accuracy_history(self, limit: int) -> list[dict]:
+        # Per-session accuracy, oldest first, built from exactly the session set (and completed_at ordering) that
+        # trend_for(overall_session_stats) compares -- so the newest `current_period_sessions` points are the trend's
+        # current period and the `previous_period_sessions` points right before them are its previous period.
+        session_ids = sorted(self.overall_session_stats, key=lambda sid: self._session_completed_at[sid])[-limit:]
+        history = []
+        for sid in session_ids:
+            stats = self.overall_session_stats[sid]
+            subjects = self._session_subjects[sid]
+            history.append({
+                "session_id": sid,
+                "completed_at": self._session_completed_at[sid],
+                "subject": next(iter(subjects)) if len(subjects) == 1 else "Mixed",
+                "correct": stats["correct"],
+                "total": stats["total"],
+                "accuracy": round(stats["correct"] / stats["total"] * 100.0, 2),
+            })
+        return history

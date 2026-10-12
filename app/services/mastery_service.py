@@ -18,9 +18,7 @@ def compute_mastery_score(
     retention_weight: float,
     consistency_weight: float,
 ) -> float:
-    # Weighted sum of the 5 components below, each clamped to 0-100 first so
-    # one out-of-range input can't skew the result beyond what it honestly
-    # should — then clamped again at the end as a final safety net.
+    # Weighted sum of the 5 components below, each clamped to 0-100 first, then clamped again at the end as a final safety net.
     weighted_total = (
         _clamp(accuracy_score) * accuracy_weight
         + _clamp(recent_performance_score) * recent_performance_weight
@@ -54,10 +52,7 @@ def compute_difficulty_score(
     base_scores: dict[str, float],
     neutral_score: float,
 ) -> float:
-    # Averages the tier's base score with how well the student actually
-    # performs at that tier, so being parked at "hard" but doing badly there
-    # doesn't score full marks just for the tier, and doing great at "easy"
-    # isn't penalized down to the tier's low base score.
+    # Averages the tier's base score with how well the student actually performs at that tier, so a bad "hard" tier doesn't score full marks and a great "easy" tier isn't penalized down.
     base = base_scores.get(current_difficulty, neutral_score)
     performance = neutral_score if accuracy_at_current_difficulty is None else accuracy_at_current_difficulty
     return _clamp((base + performance) / 2.0)
@@ -70,9 +65,7 @@ def compute_retention_score(
     *,
     neutral_score: float,
 ) -> float:
-    # A correction rate of exactly 0.0 is ambiguous on its own (could mean
-    # "every repeat was still wrong" or "there were no repeats at all"), so
-    # the counts are checked explicitly to tell those two cases apart.
+    # A correction rate of exactly 0.0 is ambiguous on its own, so the counts are checked explicitly to tell "no repeats" from "every repeat still wrong" apart.
     if corrected_previous_mistakes + repeated_same_mistakes == 0:
         return neutral_score
     return _clamp(mistake_correction_rate)
@@ -84,8 +77,7 @@ def compute_consistency_score(
     min_sessions: int,
     neutral_score: float,
 ) -> float:
-    # 100 minus the standard deviation of per-session accuracy — scores that
-    # barely vary session to session land near 100, wild swings score lower.
+    # 100 minus the standard deviation of per-session accuracy — steady scores land near 100, wild swings score lower.
     if len(session_accuracies) < min_sessions:
         return neutral_score
     stdev = statistics.stdev(session_accuracies)
@@ -116,9 +108,7 @@ def build_mastery_analytics(
     proficient_threshold: float,
     advanced_threshold: float,
 ) -> dict:
-    # Runs the full mastery calculation for one subject or topic from
-    # already-gathered numbers — never touches the DB, has no idea whether
-    # it's scoring a subject or a topic, just crunches whatever it's given.
+    # Runs the full mastery calculation for one subject or topic from already-gathered numbers — never touches the DB, doesn't know or care which it's scoring.
     if total_attempted < min_attempts:
         return {
             "mastery_score": None,

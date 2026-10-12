@@ -22,9 +22,7 @@ logger = logging.getLogger(__name__)
 
 _groq_client = AsyncGroq(api_key=settings.GROQ_API_KEY)
 
-# Only these are worth retrying — rate limits, timeouts, dropped connections,
-# and Groq-side 5xx are transient. Everything else (bad auth, bad request)
-# would just fail the same way again, so those raise immediately instead.
+# Only these are worth retrying (transient); everything else raises immediately since it would just fail the same way again.
 _TRANSIENT_GROQ_ERRORS = (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError)
 
 _REFERENCE_MATERIAL_RULES = """
@@ -36,9 +34,7 @@ REFERENCE MATERIAL RULES (only apply when reference material is provided below):
 
 
 def _build_reference_block(snippets: list[str] | None, limit: int) -> str:
-    # Flat "reference material" block used for the lesson-pinned path and the
-    # no-curriculum random-lesson path -- see the lesson_choices branch below
-    # for the per-lesson variant used when a curriculum lesson list exists.
+    # Flat "reference material" block used for the lesson-pinned and no-curriculum random-lesson paths -- see the lesson_choices branch below for the per-lesson variant.
     if not snippets:
         return ""
     lines = "\n".join(f"- {s}" for s in snippets[:limit])
@@ -48,9 +44,7 @@ def _build_reference_block(snippets: list[str] | None, limit: int) -> str:
 async def _create_chat_completion_with_retry(
     *, messages: Iterable[ChatCompletionMessageParam], max_tokens: int = 4096,
 ):
-    # Retries transient Groq errors with backoff + jitter. Without this, one
-    # rate-limit blip used to fail the whole quiz generation and fall back to
-    # the (often near-empty) DB cache far more often than it should have.
+    # Retries transient Groq errors with backoff + jitter, so one rate-limit blip doesn't fail the whole quiz generation.
     last_exc: Exception | None = None
     for attempt in range(settings.GROQ_MAX_RETRIES + 1):
         try:
@@ -71,9 +65,7 @@ async def _create_chat_completion_with_retry(
                 type(exc).__name__, attempt + 1, settings.GROQ_MAX_RETRIES + 1, delay, exc,
             )
             await asyncio.sleep(delay)
-    # The loop only falls through here after `last_exc` has been set (it
-    # exits via `break` right after catching one) -- assert makes that
-    # invariant explicit for the type checker too.
+    # The loop only falls through here after `last_exc` has been set -- assert makes that invariant explicit for the type checker too.
     assert last_exc is not None
     raise last_exc
 
@@ -93,41 +85,7 @@ async def generate_questions(
     reference_snippets: list[str] | None = None,
     reference_by_lesson: dict[str, list[str]] | None = None,
 ) -> list[dict]:
-    # Asks Groq for `question_count` MCQs and hands back a validated list of
-    # dicts (question/options/correct_answer/explanation/lesson). If `lesson`
-    # is omitted, each question gets its own randomly varied lesson instead
-    # of the whole quiz being pinned to one topic. `existing_questions` are
-    # passed to the model so it knows what not to repeat; `avoid_lessons`
-    # nudges it toward topic variety across separate quiz generations, not
-    # just within one quiz.
-    #
-    # `lesson_choices` is the curriculum's fixed lesson list for this
-    # (grade, subject) — see app/services/curriculum_service.py. When set
-    # (only possible when `lesson` is None, i.e. random_lessons), the model
-    # is told to pick from this exact list instead of inventing topic names,
-    # and each returned "lesson" is snapped to it post-generation. None for
-    # grades without curriculum data, preserving the old free-text behavior.
-    #
-    # `preferred_lessons` and `adaptive_context` are optional, additive hints
-    # from the adaptive-mastery engine (weak lessons to weight coverage
-    # toward, and a short plain-language note about the student's current
-    # standing) — both default to None and change nothing about the prompt
-    # when omitted, so every existing caller (and the lesson-pinned branch,
-    # which never receives them) behaves exactly as before. Only ever a
-    # short natural-language hint — never raw DB rows/ids/scores, per the
-    # "don't expose unnecessary internal DB details to the LLM" requirement.
-    #
-    # `reference_snippets` / `reference_by_lesson` are optional grounding
-    # excerpts pulled from the curriculum knowledge base by app/services/
-    # rag_service.py (see quiz_service.py's call sites) -- flat list for the
-    # lesson-pinned and no-curriculum random-lesson paths, keyed by lesson
-    # for the curriculum-backed random-lesson path. Both default to None and
-    # change nothing about the prompt when omitted or empty, same contract
-    # as preferred_lessons/adaptive_context above. Retrieval is best-effort
-    # upstream (rag_service never raises), so this function never needs to
-    # handle a retrieval failure itself -- it just sees fewer/no snippets.
-    #
-    # Raises HTTPException(502) on any Groq/parsing failure.
+    # Asks Groq for `question_count` MCQs and hands back a validated list of dicts; if `lesson` is omitted, each question gets its own randomly varied lesson. `lesson_choices` (curriculum's fixed lesson list, see curriculum_service.py) constrains the model to real topic names when set. `preferred_lessons`/`adaptive_context` are optional adaptive-mastery hints (never raw DB rows/ids/scores). `reference_snippets`/`reference_by_lesson` are optional RAG grounding excerpts (see rag_service.py), best-effort and empty on failure. Raises HTTPException(502) on any Groq/parsing failure.
     existing_questions = existing_questions or []
     avoid_lessons = avoid_lessons or []
     random_lessons = lesson is None
@@ -208,10 +166,7 @@ QUALITY RULES:
 
         adaptive_context_block = f"\n\nStudent context: {adaptive_context}\n" if adaptive_context else ""
 
-        # Per-lesson references are embedded directly into lesson_list_block
-        # below when a curriculum lesson list exists -- this flat block only
-        # applies to the no-curriculum path, where there's no fixed lesson
-        # list to attach snippets to individually.
+        # Per-lesson references are embedded directly into lesson_list_block below when a curriculum lesson list exists -- this flat block only applies to the no-curriculum path.
         reference_block = "" if lesson_choices else _build_reference_block(
             reference_snippets, settings.RAG_SNIPPETS_PER_LESSON
         )
@@ -335,19 +290,13 @@ QUALITY RULES:
         if lesson_choices:
             q_lesson = lesson_by_lower.get(str(q.get("lesson", "")).strip().lower())
             if q_lesson is None:
-                # Non-matching return: coerce to the least-used curriculum
-                # lesson so far rather than dropping the question (loses a
-                # whole generated question over a cosmetic label mismatch)
-                # or retrying (burns another Groq call for the same).
+                # Non-matching return: coerce to the least-used curriculum lesson so far rather than dropping the question or retrying.
                 q_lesson = min(lesson_choices, key=lambda l: lesson_usage_count[l])
             lesson_usage_count[q_lesson] += 1
         else:
             q_lesson = lesson if lesson else (str(q.get("lesson", "")).strip() or subject)
 
-        # Must have exactly 4 options (Groq occasionally ignores that rule
-        # and returns 5+). Truncating to 4 risks losing the actual correct
-        # answer, so a bad-count question is dropped entirely rather than
-        # patched up — the caller's retry loop tops up the shortfall.
+        # Must have exactly 4 options (Groq occasionally returns 5+); a bad-count question is dropped entirely rather than patched up -- the caller's retry loop tops up the shortfall.
         if not question_text or not isinstance(options, list) or len(options) != 4:
             logger.warning(
                 "Skipping malformed question at index %d: expected 4 options, got %d",
@@ -355,11 +304,7 @@ QUALITY RULES:
             )
             continue
 
-        # correct_answer has to actually match one of the options (exact, or
-        # case/whitespace-insensitive). If it matches neither, there's no way
-        # to know which option is really correct — dropping it beats the old
-        # behavior of defaulting to options[0] and mislabeling a wrong answer
-        # as correct.
+        # correct_answer has to match one of the options (exact or case/whitespace-insensitive); if it matches neither, drop it rather than defaulting to options[0] and mislabeling a wrong answer as correct.
         if correct not in options:
             match = next((o for o in options if o.strip().lower() == correct.strip().lower()), None)
             if match is None:
@@ -401,34 +346,7 @@ async def generate_shuffle_quiz_questions(
     telemetry: dict | None = None,
     reference_by_lesson_by_subject: dict[str, dict[str, list[str]]] | None = None,
 ) -> list[dict]:
-    """Shuffle Mode's entire AI phase in ONE Groq call: asks for every
-    subject's questions at once, each at that subject's own current
-    adaptive difficulty, instead of one call (or several retries) per
-    subject. `subject_plan` is a list of (subject, difficulty, count) --
-    each subject's difficulty is decided by the caller from the student's
-    real mastery data (see difficulty_service), never left for the model
-    to pick. `existing_questions_by_subject` is that subject's already-
-    cached question texts (same "avoid these" mechanism generate_questions()
-    uses for normal quizzes) -- without it, Groq has no way to know a
-    question it's about to write already exists in the DB, which is why
-    Shuffle Mode kept resurfacing near-identical questions before this.
-
-    Returns a flat list of validated question dicts, each tagged with which
-    subject it belongs to: {"subject", "lesson", "difficulty", "question",
-    "options", "correct_answer", "explanation"}. `difficulty` is always
-    copied from `subject_plan`, never trusted from the AI's own response.
-    A question whose "subject" doesn't match one of the requested subjects
-    is dropped rather than guessed at.
-
-    `reference_by_lesson_by_subject` is the shuffle-mode counterpart of
-    generate_questions()'s `reference_by_lesson` -- grounding excerpts from
-    app/services/rag_service.py, keyed by subject then lesson. Optional and
-    additive like every other hint here; an absent/empty entry for a subject
-    changes nothing about that subject's block below.
-
-    Raises HTTPException(502) on any Groq/parsing failure, same as
-    generate_questions() -- the caller falls back to the DB cache.
-    """
+    # Shuffle Mode's entire AI phase in ONE Groq call: asks for every subject's questions at once, each at that subject's own adaptive difficulty (from `subject_plan`, never left for the model to pick). Returns a flat list of validated question dicts tagged by subject, with `difficulty` always copied from `subject_plan`; a question whose "subject" doesn't match is dropped. `reference_by_lesson_by_subject` is the shuffle-mode counterpart of generate_questions()'s `reference_by_lesson`. Raises HTTPException(502) on any Groq/parsing failure, same as generate_questions().
     avoid_lessons_by_subject = avoid_lessons_by_subject or {}
     existing_questions_by_subject = existing_questions_by_subject or {}
     lesson_choices_by_subject = lesson_choices_by_subject or {}
@@ -479,9 +397,7 @@ QUALITY RULES:
 
     seed_context = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
-    # Capped lower than generate_questions()'s single-subject 60 -- a shuffle
-    # prompt already lists this block once per subject, so an uncapped list
-    # here would blow up prompt size fast on a many-subject shuffle.
+    # Capped lower than generate_questions()'s single-subject 60 -- an uncapped list here would blow up prompt size fast on a many-subject shuffle.
     _EXISTING_QUESTIONS_PER_SUBJECT_CAP = 20
 
     plan_lines = []
@@ -530,9 +446,7 @@ QUALITY RULES:
         f"Return exactly {total_count} questions in the required JSON format."
     )
 
-    # Scales with the batch size instead of the fixed 4096 single-subject
-    # calls use — a multi-subject shuffle batch can ask for meaningfully
-    # more completion tokens than one subject alone ever would.
+    # Scales with the batch size instead of the fixed 4096 single-subject calls use -- a multi-subject shuffle batch needs meaningfully more completion tokens.
     max_tokens = min(8192, max(4096, total_count * 220))
 
     try:
@@ -587,8 +501,7 @@ QUALITY RULES:
         if choices
     }
 
-    # A little overshoot is tolerated (the model sometimes returns a few
-    # extra) -- the caller caps each subject at its own requested count.
+    # A little overshoot is tolerated -- the caller caps each subject at its own requested count.
     cap = total_count * 2
 
     validated: list[dict] = []
@@ -661,12 +574,7 @@ QUALITY RULES:
 
 
 async def generate_feedback(analytics_summary: dict) -> dict:
-    # Turns the user's analytics into a short, personalised pep talk from
-    # Groq. `analytics_summary["recommendations"]` is deterministic and
-    # database-driven (see recommendation_service.py, no AI involved) — the
-    # prompt tells Groq to treat it as ground truth and build suggestions
-    # from it rather than inventing its own analysis, so the AI's wording
-    # stays consistent with the numbers shown elsewhere in the app.
+    # Turns the user's analytics into a short, personalised pep talk from Groq; `analytics_summary["recommendations"]` is deterministic/database-driven (recommendation_service.py, no AI), and the prompt treats it as ground truth.
     system_prompt = """You are a knowledgeable and encouraging study coach for school students.
 Analyse the student's quiz performance data and provide personalised feedback.
 
@@ -758,11 +666,7 @@ async def generate_motivational_quote(
     total_questions: int,
     is_timeout: bool,
 ) -> str:
-    # A single-sentence pep talk for the result of THIS quiz specifically —
-    # distinct from generate_feedback()'s motivational_note, which is based
-    # on the student's whole historical analytics profile. Deliberately a
-    # much smaller/cheaper call (short prompt, small max_tokens) since it
-    # only needs one quiz's numbers, not the full analytics payload.
+    # A single-sentence pep talk for THIS quiz specifically, distinct from generate_feedback()'s motivational_note (whole historical profile); deliberately a much smaller/cheaper call since it only needs one quiz's numbers.
     system_prompt = """You are an encouraging study coach for school students.
 Write ONE short, original motivational quote (max 25 words) reacting to a
 student's just-finished quiz result.

@@ -13,6 +13,17 @@ class PerformanceTrend(BaseModel):
     method: str
 
 
+class AccuracyHistoryPoint(BaseModel):
+    # One completed quiz in the same session set performance_trend is computed
+    # from (completed, non-deleted, non-retake, graded), oldest first.
+    session_id: int
+    completed_at: datetime
+    subject: str
+    correct: int
+    total: int
+    accuracy: float
+
+
 class MasteryComponents(BaseModel):
     accuracy_score: float
     recent_performance_score: float
@@ -227,6 +238,7 @@ class UserAnalyticsResponse(BaseModel):
     weak_subjects: list[str]
 
     performance_trend: PerformanceTrend
+    accuracy_history: list[AccuracyHistoryPoint] = []
     repeated_question_analytics: RepeatedQuestionAnalytics
     growth: GrowthAnalytics
     recommendations: list[Recommendation] = []
