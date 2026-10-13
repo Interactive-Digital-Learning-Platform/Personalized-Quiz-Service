@@ -18,7 +18,7 @@ Chronological ordering in the real implementation is
 per-attempt timestamp of its own — so each attempt below lives in its own
 session with an explicit, strictly increasing `created_at`.
 """
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from app.models.question import Question
 from app.models.quiz_session import QuestionAttempt, QuizSession
@@ -27,7 +27,7 @@ from app.services.analytics_service import update_analytics_after_submission
 from app.services.quiz_service import get_or_create_user
 from tests.conftest import TEST_CLERK_ID
 
-NOW = datetime.now(timezone.utc)
+NOW = datetime.now(UTC)
 
 
 async def _make_question(db, subject: str, lesson: str, text: str) -> Question:

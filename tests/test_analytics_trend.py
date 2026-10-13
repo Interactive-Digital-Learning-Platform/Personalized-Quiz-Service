@@ -12,7 +12,7 @@ than via POST /quiz/generate or /quiz/submit — see test_analytics.py for the
 same rationale. `completed_at` is set explicitly on each QuizCompletion so
 each test controls exactly which comparison period a session lands in.
 """
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from app.core.config import settings
 from app.models.question import Question
@@ -23,7 +23,7 @@ from app.services.quiz_service import get_or_create_user
 from app.services.scoring_service import start_of_iso_week
 from tests.conftest import TEST_CLERK_ID
 
-NOW = datetime.now(timezone.utc)
+NOW = datetime.now(UTC)
 # Safely inside the previous ISO week regardless of what day `NOW` falls on:
 # subtracting 3 days from the current week's Monday always lands within
 # [current_week_start - 7, current_week_start), i.e. last week, never crossing

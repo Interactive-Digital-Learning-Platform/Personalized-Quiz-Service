@@ -11,15 +11,15 @@ DB (same rationale as test_analytics_difficulty.py / test_quiz_session_delete.py
 so these exercise the real difficulty_service functions without depending on
 the Groq pipeline.
 """
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 
 from app.core.config import settings
+from app.models.lesson_mastery import LessonMastery
 from app.models.question import Question
 from app.models.quiz_session import QuestionAttempt, QuizSession
 from app.models.quiz_tracking import QuizCompletion
-from app.models.lesson_mastery import LessonMastery
 from app.models.subject_mastery import SubjectMastery
 from app.services import difficulty_service
 from app.services.quiz_service import get_or_create_user
@@ -163,7 +163,7 @@ async def test_mastery_update_persists_after_session_is_later_soft_deleted(db_se
         select(QuizSession).where(QuizSession.user_id == user.id, QuizSession.subject == "Mathematics")
     )).scalars().all()
     for s in sessions:
-        s.deleted_at = datetime.now(timezone.utc)
+        s.deleted_at = datetime.now(UTC)
     await db_session.commit()
 
     mastery_after = await _get_subject_row(db_session, user.id, "Mathematics")
@@ -183,7 +183,7 @@ async def test_history_queries_read_through_soft_deleted_sessions(db_session):
         select(QuizSession).where(QuizSession.user_id == user.id, QuizSession.subject == "Science")
     )).scalars().all()
     for s in sessions:
-        s.deleted_at = datetime.now(timezone.utc)
+        s.deleted_at = datetime.now(UTC)
     await db_session.commit()
 
     rows = await difficulty_service._fetch_recent_completions(db_session, user.id, "Science", limit=10)

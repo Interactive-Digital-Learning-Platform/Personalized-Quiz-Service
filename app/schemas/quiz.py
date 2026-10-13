@@ -104,21 +104,30 @@ class GenerateQuizRequest(BaseModel):
         return self
 
 
-class QuestionOut(BaseModel):
+class QuestionPublic(BaseModel):
+    """A question as served to a player who hasn't finished the quiz yet --
+    deliberately no correct_answer, so the answer key can't be read off the
+    network before submitting (grading is server-side, see submit_quiz)."""
+
     id: int
     question: str
     options: list[Any] | None = None
     subject: str
     lesson: str
     difficulty: str
-    correct_answer: str | None = None
 
     model_config = {"from_attributes": True}
 
 
+class QuestionOut(QuestionPublic):
+    # Only filled in once the session is completed (GET /quiz/sessions/{id});
+    # None while the quiz is still in progress.
+    correct_answer: str | None = None
+
+
 class GenerateQuizResponse(BaseModel):
     session_id: int
-    questions: list[QuestionOut]
+    questions: list[QuestionPublic]
     cache_hit: bool = False
     difficulty: str
     lesson: str
@@ -209,6 +218,16 @@ class QuizQuoteResponse(BaseModel):
     quote: str
 
 
+class QuestionResult(BaseModel):
+    """Per-question grading result, returned only after submitting -- this is
+    where the client learns the correct answers for the results/review screen."""
+
+    question_id: int
+    selected_answer: str
+    correct_answer: str | None
+    is_correct: bool | None  # None when the question has no answer key
+
+
 class SubmitQuizResponse(BaseModel):
     session_id: int
     score: float
@@ -224,3 +243,5 @@ class SubmitQuizResponse(BaseModel):
     repeated_wrong_count: int
     repeated_lessons_right: list[str]
     repeated_lessons_wrong: list[str]
+    # In the session's question order; unanswered questions have selected_answer "".
+    question_results: list[QuestionResult] = Field(default_factory=list)

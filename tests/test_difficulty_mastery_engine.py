@@ -7,11 +7,10 @@ no async, just the math. Integration-level behavior (DB orchestration,
 idempotency, concurrency) is covered separately in
 tests/test_difficulty_service_adaptive.py.
 """
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from app.core.config import settings
 from app.services import difficulty_mastery_engine as engine
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # calculate_quiz_evidence
@@ -194,7 +193,7 @@ def test_fluency_aggregate_averages_question_scores():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_recency_weight_bands():
-    now = datetime(2026, 1, 31, tzinfo=timezone.utc)
+    now = datetime(2026, 1, 31, tzinfo=UTC)
     assert engine.get_recency_weight(now - timedelta(days=1), now=now) == settings.ADAPTIVE_MASTERY_RECENCY_0_TO_7_DAYS
     assert engine.get_recency_weight(now - timedelta(days=10), now=now) == settings.ADAPTIVE_MASTERY_RECENCY_8_TO_14_DAYS
     assert engine.get_recency_weight(now - timedelta(days=20), now=now) == settings.ADAPTIVE_MASTERY_RECENCY_15_TO_30_DAYS
@@ -220,7 +219,7 @@ def _history(*accuracies: float, start: datetime) -> list[tuple[int, int, int, d
 
 
 def test_trend_insufficient_data_below_two_windows():
-    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    start = datetime(2026, 1, 1, tzinfo=UTC)
     history = _history(80, 80, 80, 80, start=start)  # 4 < 2*3
     result = engine.calculate_trend(history)
     assert result.trend_label == "insufficient_data"
@@ -228,7 +227,7 @@ def test_trend_insufficient_data_below_two_windows():
 
 
 def test_trend_improving_with_enough_history():
-    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    start = datetime(2026, 1, 1, tzinfo=UTC)
     # previous 3 at 50%, recent 3 at 90% -> clearly improving.
     history = _history(50, 50, 50, 90, 90, 90, start=start)
     result = engine.calculate_trend(history)
@@ -237,14 +236,14 @@ def test_trend_improving_with_enough_history():
 
 
 def test_trend_declining_with_enough_history():
-    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    start = datetime(2026, 1, 1, tzinfo=UTC)
     history = _history(90, 90, 90, 50, 50, 50, start=start)
     result = engine.calculate_trend(history)
     assert result.trend_label == "declining"
 
 
 def test_trend_stable_with_enough_history():
-    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    start = datetime(2026, 1, 1, tzinfo=UTC)
     history = _history(80, 80, 80, 80, 80, 80, start=start)
     result = engine.calculate_trend(history)
     assert result.trend_label == "stable"

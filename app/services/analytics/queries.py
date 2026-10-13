@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import Integer, and_, case, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -46,7 +46,7 @@ UNKNOWN_TOPIC = "Unknown Topic"
 
 
 def as_utc(dt: datetime) -> datetime:
-    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
 def _topic_expr():
@@ -141,7 +141,7 @@ async def fetch_session_completion_stats(db: AsyncSession, user_id: int) -> Sess
     incomplete_rows = (await db.execute(incomplete_activity_stmt)).all()
 
     incomplete_sessions = len(incomplete_rows)
-    abandoned_cutoff = datetime.now(timezone.utc) - timedelta(
+    abandoned_cutoff = datetime.now(UTC) - timedelta(
         hours=settings.ANALYTICS_ABANDONED_AFTER_HOURS
     )
     abandoned_sessions = sum(

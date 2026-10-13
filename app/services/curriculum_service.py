@@ -1,11 +1,11 @@
 import json
-from functools import lru_cache
+from functools import cache
 from pathlib import Path
 
 _CURRICULUM_DIR = Path(__file__).resolve().parent.parent / "data" / "curriculum"
 
 
-@lru_cache(maxsize=None)
+@cache
 def _load_grade(grade: int) -> dict[str, list[str]] | None:
     path = _CURRICULUM_DIR / f"grade_{grade}.json"
     if not path.exists():

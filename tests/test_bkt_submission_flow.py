@@ -12,7 +12,11 @@ from app.models.question import Question
 from app.models.quiz_session import QuizSession
 from app.models.skill_bkt_state import SkillBKTState
 from app.schemas.quiz import AnswerItem, SubmitQuizRequest
-from app.services.quiz_service import create_retake_session, get_or_create_user, submit_quiz
+from app.services.quiz_service import (
+    create_retake_session,
+    get_or_create_user,
+    submit_quiz,
+)
 from tests.conftest import TEST_CLERK_ID
 
 
