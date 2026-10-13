@@ -1,8 +1,13 @@
 from app.core.config import settings
 from app.services import bkt_service, difficulty_service
 from app.services.analytics.mastery_service import MasteryScoreService
-from app.services.analytics.repeated_mistake_service import RepeatedMistakeAnalyticsService
-from app.services.analytics.summary_service import compute_answering_behavior, compute_response_time_stats
+from app.services.analytics.repeated_mistake_service import (
+    RepeatedMistakeAnalyticsService,
+)
+from app.services.analytics.summary_service import (
+    compute_answering_behavior,
+    compute_response_time_stats,
+)
 from app.services.analytics.trend_service import TrendAnalyticsService
 from app.services.analytics.types import BKTRow, ResponseTimeRow, TopicRow
 from app.services.scoring_service import classify_topic_status

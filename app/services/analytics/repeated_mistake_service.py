@@ -1,5 +1,8 @@
 from app.services.analytics.types import RepeatedAttemptRow
-from app.services.scoring_service import aggregate_repeated_question_stats, compute_repeated_question_group_stats
+from app.services.scoring_service import (
+    aggregate_repeated_question_stats,
+    compute_repeated_question_group_stats,
+)
 
 
 class RepeatedMistakeAnalyticsService:

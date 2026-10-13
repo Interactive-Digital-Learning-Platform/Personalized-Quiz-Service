@@ -26,7 +26,7 @@ re-test those formulas, only the NEW orchestration/query layer this
 refactor introduced around them.
 """
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import event
@@ -37,8 +37,9 @@ from app.models.quiz_session import QuestionAttempt, QuizSession
 from app.models.quiz_tracking import QuizCompletion
 from app.services.analytics import queries
 from app.services.analytics.mastery_service import MasteryScoreService
-from app.services.analytics.orchestrator import AnalyticsOrchestrationService
-from app.services.analytics.repeated_mistake_service import RepeatedMistakeAnalyticsService
+from app.services.analytics.repeated_mistake_service import (
+    RepeatedMistakeAnalyticsService,
+)
 from app.services.analytics.summary_service import compute_response_time_stats
 from app.services.analytics.topic_service import TopicAnalyticsService
 from app.services.analytics.trend_service import TrendAnalyticsService
@@ -52,7 +53,7 @@ from app.services.analytics.types import (
 from app.services.quiz_service import get_or_create_user
 from tests.conftest import TEST_CLERK_ID
 
-NOW = datetime.now(timezone.utc)
+NOW = datetime.now(UTC)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

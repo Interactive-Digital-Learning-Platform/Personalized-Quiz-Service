@@ -9,12 +9,12 @@ these tests build minimal dicts by hand rather than touching a real DB.
 See tests/test_analytics_recommendations.py for integration tests exercising
 this wired up end-to-end through GET /analytics/me.
 """
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.core.config import settings
 from app.services import recommendation_service
 
-NOW = datetime.now(timezone.utc)
+NOW = datetime.now(UTC)
 
 
 def _topic(

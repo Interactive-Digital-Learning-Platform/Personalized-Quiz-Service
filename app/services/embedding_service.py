@@ -1,5 +1,4 @@
 import logging
-from typing import List
 
 from sentence_transformers import SentenceTransformer
 
@@ -32,7 +31,7 @@ class EmbeddingGenerator:
 
         logger.info(f"Embedding model ready — dim={self.embedding_dimension()}")
 
-    def embed_single(self, text: str) -> List[float]:
+    def embed_single(self, text: str) -> list[float]:
         prefixed = f"search_query: {text}"
         prefixed = self._truncate(prefixed, label="query")
 

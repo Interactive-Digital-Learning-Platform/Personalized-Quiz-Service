@@ -3,9 +3,11 @@ import logging
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.database import get_db
-from app.core.security import get_current_user
+from app.core.security import ClerkId, get_current_user
 from app.schemas.user import UserOut, UserSyncRequest
+from app.services.clerk_service import fetch_clerk_username
 from app.services.quiz_service import get_or_create_user
 
 logger = logging.getLogger(__name__)
@@ -24,11 +26,10 @@ router = APIRouter(prefix="/user", tags=["User"])
     ),
 )
 async def get_my_profile(
+    clerk_id: ClerkId,
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> UserOut:
-    clerk_id: str = current_user.get("sub", "")
-
     user = await get_or_create_user(db=db, clerk_id=clerk_id)
 
     clerk_username = current_user.get("username") or current_user.get("name")
@@ -53,18 +54,23 @@ async def get_my_profile(
     ),
 )
 async def sync_user(
+    clerk_id: ClerkId,
     payload: UserSyncRequest | None = None,
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> UserOut:
-    clerk_id: str = current_user.get("sub", "")
     user = await get_or_create_user(db=db, clerk_id=clerk_id)
 
-    username = (
-        (payload.username if payload else None)
-        or current_user.get("username")
-        or current_user.get("name")
-    )
+    if settings.CLERK_SECRET_KEY:
+        # Verified source: never trust the client-sent name when Clerk itself can be asked. A failed lookup leaves the
+        # stored username unchanged rather than falling back to the unverified one.
+        username = await fetch_clerk_username(clerk_id)
+    else:
+        username = (
+            (payload.username if payload else None)
+            or current_user.get("username")
+            or current_user.get("name")
+        )
     if username and user.username != username:
         user.username = username
         db.add(user)

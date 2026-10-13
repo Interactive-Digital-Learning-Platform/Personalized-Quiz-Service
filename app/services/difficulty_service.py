@@ -11,7 +11,8 @@ from app.models.question import Question
 from app.models.quiz_session import QuestionAttempt, QuizSession
 from app.models.quiz_tracking import QuizCompletion
 from app.models.subject_mastery import SubjectMastery
-from app.services import curriculum_service, difficulty_mastery_engine as engine
+from app.services import curriculum_service
+from app.services import difficulty_mastery_engine as engine
 
 logger = logging.getLogger(__name__)
 

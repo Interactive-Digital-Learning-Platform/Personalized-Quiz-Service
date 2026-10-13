@@ -6,7 +6,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -15,10 +16,24 @@ from app.models.question import Question
 from app.models.quiz_session import QuestionAttempt, QuizSession
 from app.models.quiz_tracking import QuizCompletion, QuizProgressSnapshot
 from app.models.user import User
-from app.schemas.quiz import GenerateQuizRequest, SaveProgressRequest, SubmitQuizRequest
-from app.services import bkt_service, curriculum_service, difficulty_mastery_engine as mastery_engine
-from app.services import difficulty_service, rag_service, telemetry_service
-from app.services.groq_service import generate_questions, generate_shuffle_quiz_questions
+from app.schemas.quiz import (
+    AnswerItem,
+    GenerateQuizRequest,
+    SaveProgressRequest,
+    SubmitQuizRequest,
+)
+from app.services import (
+    bkt_service,
+    curriculum_service,
+    difficulty_service,
+    rag_service,
+    telemetry_service,
+)
+from app.services import difficulty_mastery_engine as mastery_engine
+from app.services.groq_service import (
+    generate_questions,
+    generate_shuffle_quiz_questions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +68,7 @@ async def create_retake_session(db: AsyncSession, clerk_id: str, session_id: int
         user_id=user.id,
         subject=source.subject,
         lesson=source.lesson,
+        grade=source.grade,
         difficulty=source.difficulty,
         question_count=source.question_count,
         questions_snapshot=source.questions_snapshot,
@@ -360,9 +376,17 @@ async def get_or_create_user(db: AsyncSession, clerk_id: str) -> User:
 
     if user is None:
         logger.info("First login — creating user record for clerk_id=%s", clerk_id)
+        # The app fires several requests in parallel right after sign-in (user sync, analytics, sessions), so two of
+        # them can both miss the SELECT above and race to INSERT. The savepoint lets the loser's unique-clerk_id
+        # violation roll back on its own and re-read the row the winner just created, instead of failing with a 500.
         user = User(clerk_id=clerk_id)
-        db.add(user)
-        await db.commit()
+        try:
+            async with db.begin_nested():
+                db.add(user)
+            await db.commit()
+        except IntegrityError:
+            user = (await db.execute(stmt)).scalar_one()
+            return user
         await db.refresh(user)
 
     return user
@@ -1047,6 +1071,51 @@ def _lesson_accuracy_breakdown_for(
     }
 
 
+def _answers_for_session(session: QuizSession, submitted: list[AnswerItem]) -> list[AnswerItem]:
+    """The answers to grade, in the session's own question order.
+
+    The client only says what it picked; WHICH questions count comes from the
+    session's questions_snapshot. So an answer for a question that wasn't
+    served in this session, or a second answer for the same question, is a
+    422 -- otherwise a tampered request could answer one known question ten
+    times for 100% (and push that into mastery/BKT). Questions the client left
+    out count as unanswered (selected_answer ""), so accuracy is always out of
+    the whole quiz. Sessions without a snapshot (legacy rows) fall back to the
+    submitted list, still de-duplicated.
+    """
+    seen: set[int] = set()
+    duplicates: set[int] = set()
+    for a in submitted:
+        if a.question_id in seen:
+            duplicates.add(a.question_id)
+        seen.add(a.question_id)
+    if duplicates:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Each question can only be answered once (duplicates: {sorted(duplicates)}).",
+        )
+
+    served_ids = [
+        q["id"] for q in (session.questions_snapshot or [])
+        if isinstance(q, dict) and q.get("id") is not None
+    ]
+    if not served_ids:
+        return list(submitted)
+
+    unknown = sorted(seen - set(served_ids))
+    if unknown:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Answers include questions that aren't part of this quiz: {unknown}.",
+        )
+
+    by_id = {a.question_id: a for a in submitted}
+    return [
+        by_id.get(qid) or AnswerItem(question_id=qid, selected_answer="", response_time=0.0)
+        for qid in served_ids
+    ]
+
+
 async def submit_quiz(
     db: AsyncSession,
     clerk_id: str,
@@ -1066,7 +1135,8 @@ async def submit_quiz(
             detail="This quiz session is already completed.",
         )
 
-    question_ids = [a.question_id for a in payload.answers]
+    answers = _answers_for_session(session, payload.answers)
+    question_ids = [a.question_id for a in answers]
     q_stmt = select(Question).where(Question.id.in_(question_ids))
     q_result = await db.execute(q_stmt)
     question_map: dict[int, Question] = {q.id: q for q in q_result.scalars().all()}
@@ -1081,8 +1151,9 @@ async def submit_quiz(
     repeated_lessons_wrong: set[str] = set()
     repeated_question_ids = set(payload.repeated_question_ids)
     graded_answers: list[difficulty_service.GradedAnswer] = []
+    question_results: list[dict] = []
 
-    for answer in payload.answers:
+    for answer in answers:
         question = question_map.get(answer.question_id)
         is_correct: bool | None = None
         lesson = question.lesson if question is not None else "unknown"
@@ -1109,15 +1180,23 @@ async def submit_quiz(
                 repeated_wrong_count += 1
                 repeated_lessons_wrong.add(lesson)
 
-        attempt = QuestionAttempt(
-            session_id=session.id,
-            question_id=answer.question_id,
-            selected_answer=answer.selected_answer,
-            correct=is_correct,
-            response_time=answer.response_time,
-        )
-        db.add(attempt)
+        # A question row removed since the quiz was served can't take an attempt
+        # (FK) -- it still counts toward the total, just without a stored attempt.
+        if question is not None:
+            db.add(QuestionAttempt(
+                session_id=session.id,
+                question_id=answer.question_id,
+                selected_answer=answer.selected_answer,
+                correct=is_correct,
+                response_time=answer.response_time,
+            ))
         total_time += answer.response_time
+        question_results.append({
+            "question_id": answer.question_id,
+            "selected_answer": answer.selected_answer,
+            "correct_answer": question.correct_answer if question is not None else None,
+            "is_correct": is_correct,
+        })
 
         graded_answers.append(difficulty_service.GradedAnswer(
             subject=question.subject if question is not None else session.subject,
@@ -1128,7 +1207,7 @@ async def submit_quiz(
             fingerprint=question.question_fingerprint if question is not None else "",
         ))
 
-    total_questions = len(payload.answers)
+    total_questions = len(answers)
     accuracy = (correct_count / total_questions * 100.0) if total_questions > 0 else 0.0
     avg_response_time = total_time / total_questions if total_questions > 0 else 0.0
     lesson_time_breakdown = {
@@ -1167,19 +1246,28 @@ async def submit_quiz(
         repeated_wrong_count=repeated_wrong_count,
     )
 
-    final_snapshot = QuizProgressSnapshot(
-        session_id=session.id,
+    await _upsert_progress_snapshot(
+        db,
+        session.id,
         remaining_time=payload.remaining_time_at_end,
         answered_count=total_questions,
         repeated_question_ids=sorted(repeated_question_ids) if repeated_question_ids else None,
         weak_lessons_hint=sorted(repeated_lessons_wrong),
-        draft_answers=[a.model_dump() for a in payload.answers],
+        draft_answers=[a.model_dump() for a in answers],
     )
 
     db.add(session)
     db.add(completion)
-    db.add(final_snapshot)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # A second submit (double tap, retry after a slow network) can pass the "already completed" check above
+        # before the first one commits; quiz_completions.session_id is unique, so the loser lands here.
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This quiz session is already completed.",
+        )
 
     logger.info(
         "Quiz session %d submitted: %d/%d correct, accuracy=%.1f%%, total_time=%.1fs",
@@ -1244,9 +1332,35 @@ async def submit_quiz(
         "repeated_wrong_count": repeated_wrong_count,
         "repeated_lessons_right": sorted(repeated_lessons_right),
         "repeated_lessons_wrong": sorted(repeated_lessons_wrong),
+        "question_results": question_results,
         # Not part of SubmitQuizResponse — routes/quiz.py pops this before building the response; it only tells the caller whether to skip the post-submit analytics recompute.
         "is_retake": session.is_retake,
     }
+
+
+async def _upsert_progress_snapshot(db: AsyncSession, session_id: int, **fields) -> QuizProgressSnapshot:
+    """Keep exactly one progress row per session: the client autosaves every few
+    seconds, and appending a row each time piled up thousands per quiz. Updates
+    the newest row in place (dropping any older ones left from before this) or
+    adds the first one. Not committed -- the caller commits."""
+    result = await db.execute(
+        select(QuizProgressSnapshot)
+        .where(QuizProgressSnapshot.session_id == session_id)
+        .order_by(QuizProgressSnapshot.saved_at.desc(), QuizProgressSnapshot.id.desc())
+    )
+    existing = list(result.scalars().all())
+    if not existing:
+        snapshot = QuizProgressSnapshot(session_id=session_id, **fields)
+        db.add(snapshot)
+        return snapshot
+
+    snapshot, stale = existing[0], existing[1:]
+    for key, value in fields.items():
+        setattr(snapshot, key, value)
+    snapshot.saved_at = func.now()
+    if stale:
+        await db.execute(delete(QuizProgressSnapshot).where(QuizProgressSnapshot.id.in_([s.id for s in stale])))
+    return snapshot
 
 
 async def save_quiz_progress(
@@ -1257,15 +1371,24 @@ async def save_quiz_progress(
     user = await get_or_create_user(db, clerk_id)
     session = await _get_owned_session(db=db, user_id=user.id, session_id=payload.session_id)
 
-    snapshot = QuizProgressSnapshot(
-        session_id=session.id,
+    # A late autosave (in flight while the quiz was being submitted) would otherwise become the session's newest
+    # snapshot and overwrite the final one submit_quiz wrote -- the sessions list reads answered_count from it.
+    completed = await db.execute(select(QuizCompletion.id).where(QuizCompletion.session_id == session.id))
+    if completed.first() is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This quiz session is already completed.",
+        )
+
+    snapshot = await _upsert_progress_snapshot(
+        db,
+        session.id,
         remaining_time=payload.remaining_time,
         answered_count=payload.answered_count,
         repeated_question_ids=payload.repeated_question_ids or None,
         weak_lessons_hint=payload.weak_lessons_hint or None,
         draft_answers=[a.model_dump() for a in payload.draft_answers] or None,
     )
-    db.add(snapshot)
     await db.commit()
     await db.refresh(snapshot)
 

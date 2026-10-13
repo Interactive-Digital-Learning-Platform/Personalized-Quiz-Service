@@ -12,9 +12,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from app.models.lesson_mastery import LessonMastery
+from app.schemas.quiz import GenerateQuizRequest
 from app.services import bkt_service, groq_service
 from app.services.quiz_service import generate_quiz, get_or_create_user
-from app.schemas.quiz import GenerateQuizRequest
 from tests.conftest import TEST_CLERK_ID
 
 

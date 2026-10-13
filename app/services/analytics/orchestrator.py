@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -7,8 +7,13 @@ from app.services.analytics import queries
 from app.services.analytics.growth_service import GrowthAnalyticsService
 from app.services.analytics.mastery_service import MasteryScoreService
 from app.services.analytics.recommendation_service import RecommendationService
-from app.services.analytics.repeated_mistake_service import RepeatedMistakeAnalyticsService
-from app.services.analytics.subject_service import SubjectAnalyticsService, build_difficulty_performance_by_subject
+from app.services.analytics.repeated_mistake_service import (
+    RepeatedMistakeAnalyticsService,
+)
+from app.services.analytics.subject_service import (
+    SubjectAnalyticsService,
+    build_difficulty_performance_by_subject,
+)
 from app.services.analytics.summary_service import AnalyticsSummaryService
 from app.services.analytics.timing import timed_phase
 from app.services.analytics.topic_service import TopicAnalyticsService
@@ -61,7 +66,7 @@ class AnalyticsOrchestrationService:
             difficulty_session_rows = await queries.fetch_difficulty_session_rows(db, user.id)
             topic_difficulty_rows = await queries.fetch_topic_difficulty_rows(db, user.id)
 
-            growth_window_start = datetime.now(timezone.utc) - timedelta(days=settings.ANALYTICS_GROWTH_WINDOW_DAYS)
+            growth_window_start = datetime.now(UTC) - timedelta(days=settings.ANALYTICS_GROWTH_WINDOW_DAYS)
             growth_session_rows = await queries.fetch_growth_session_rows(db, user.id, growth_window_start)
             growth_attempt_rows = await queries.fetch_growth_attempt_rows(db, user.id, growth_window_start)
 
