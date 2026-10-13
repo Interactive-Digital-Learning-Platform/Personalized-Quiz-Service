@@ -40,6 +40,19 @@ class TrendAttemptRow:
 
 
 @dataclass(frozen=True, slots=True)
+class DailySessionRow:
+    # One completed (non-deleted, non-retake) quiz, aggregated over its graded attempts -- the unit
+    # daily_service buckets into the student's local calendar days.
+    session_id: int
+    completed_at: datetime
+    study_time: float
+    graded_count: int
+    correct_count: int
+    response_time_sum: float
+    response_time_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class RepeatedAttemptRow:
     attempt_id: int
     correct: bool

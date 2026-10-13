@@ -62,6 +62,15 @@ class Settings(BaseSettings):
     # so both trend comparison periods are always fully present in the series.
     ANALYTICS_ACCURACY_HISTORY_LIMIT: int = 30
 
+    # Daily Progress Score (0-100, /analytics/daily): a weighted blend of that
+    # day's accuracy, improvement over the student's own prior accuracy
+    # (50 = same as usual), and effort (questions answered vs a daily target).
+    # The three weights should add up to 1.0.
+    PROGRESS_SCORE_WEIGHT_ACCURACY: float = 0.5
+    PROGRESS_SCORE_WEIGHT_IMPROVEMENT: float = 0.3
+    PROGRESS_SCORE_WEIGHT_EFFORT: float = 0.2
+    PROGRESS_SCORE_DAILY_QUESTION_TARGET: int = 10
+
     # These five mastery weights should add up to 1.0 — nothing enforces
     # that automatically, so keep it in mind if you tweak them.
     ANALYTICS_MASTERY_ACCURACY_WEIGHT: float = 0.35

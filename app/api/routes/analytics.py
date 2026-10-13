@@ -1,13 +1,15 @@
 import logging
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.security import get_current_user, require_admin_or_dev
-from app.schemas.analytics import AIFeedbackResponse, UserAnalyticsResponse
+from app.schemas.analytics import AIFeedbackResponse, DailyAnalyticsResponse, UserAnalyticsResponse
 from app.schemas.system_analytics import AIGenerationAnalyticsResponse
+from app.services.analytics.daily_service import get_daily_analytics
 from app.services.analytics_service import get_user_analytics
 from app.services.groq_service import generate_feedback
 from app.services.telemetry_service import get_ai_generation_analytics
@@ -15,6 +17,9 @@ from app.services.telemetry_service import get_ai_generation_analytics
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
+
+# 14 lets the profile compare this week against the week before.
+DAILY_WINDOW_DAYS = {7, 14, 30}
 
 
 @router.get(
@@ -46,6 +51,49 @@ async def get_my_analytics(
     analytics_data = await get_user_analytics(db=db, clerk_id=clerk_id)
 
     return UserAnalyticsResponse(**analytics_data)
+
+
+@router.get(
+    "/daily",
+    response_model=DailyAnalyticsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get my day-by-day activity",
+    description=(
+        "Per-day quizzes completed, questions answered, accuracy, study time and "
+        "average time per question for the last `days` days (7, 14 or 30), bucketed by "
+        "the student's local calendar day in `tz` (IANA name, e.g. Asia/Colombo). "
+        "Every day in the window is returned, including days with no activity."
+    ),
+)
+async def get_my_daily_analytics(
+    days: int = Query(7, description="Window length: 7, 14 or 30 days."),
+    tz: str = Query("UTC", description="IANA timezone name used for day boundaries."),
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> DailyAnalyticsResponse:
+    clerk_id: str = current_user.get("sub", "")
+    if not clerk_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token is missing the 'sub' (user ID) claim.",
+        )
+    if days not in DAILY_WINDOW_DAYS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"days must be one of {sorted(DAILY_WINDOW_DAYS)}.",
+        )
+    try:
+        zone = ZoneInfo(tz)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unknown timezone {tz!r}; expected an IANA name such as 'Asia/Colombo'.",
+        )
+
+    logger.info("GET /analytics/daily — clerk_id=%s days=%d tz=%s", clerk_id, days, tz)
+
+    daily_data = await get_daily_analytics(db, clerk_id, days=days, tz=zone)
+    return DailyAnalyticsResponse(**daily_data)
 
 
 @router.get(

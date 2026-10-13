@@ -12,6 +12,7 @@ from app.models.skill_bkt_state import SkillBKTState
 from app.models.subject_mastery import SubjectMastery
 from app.services.analytics.types import (
     BKTRow,
+    DailySessionRow,
     DifficultyAttemptRow,
     DifficultySessionRow,
     GradedTotals,
@@ -322,6 +323,53 @@ async def fetch_session_completed_at(db: AsyncSession, user_id: int) -> dict[int
     )
     rows = (await db.execute(stmt)).all()
     return {row.session_id: as_utc(row.completed_at) for row in rows}
+
+
+async def fetch_daily_session_rows(
+    db: AsyncSession, user_id: int, since: datetime | None = None,
+) -> list[DailySessionRow]:
+    # Same session set as the trend/overall analytics (completed, non-deleted, non-retake), one row per quiz with
+    # its graded-attempt counts and valid response-time totals; `since` is an optional UTC lower bound (None = full
+    # history, which the Daily Progress Score's "usual accuracy" baseline needs).
+    graded = QuestionAttempt.correct.is_not(None)
+    valid_rt = and_(
+        QuestionAttempt.response_time.is_not(None),
+        QuestionAttempt.response_time >= 0,
+        QuestionAttempt.response_time <= settings.ANALYTICS_MAX_VALID_RESPONSE_TIME_SECONDS,
+    )
+    stmt = (
+        select(
+            QuizSession.id.label("session_id"),
+            QuizCompletion.completed_at.label("completed_at"),
+            QuizCompletion.total_time.label("study_time"),
+            func.coalesce(func.sum(case((graded, 1), else_=0)), 0).label("graded_count"),
+            func.coalesce(func.sum(case((QuestionAttempt.correct.is_(True), 1), else_=0)), 0).label("correct_count"),
+            func.coalesce(func.sum(case((valid_rt, QuestionAttempt.response_time), else_=0.0)), 0.0).label("rt_sum"),
+            func.coalesce(func.sum(case((valid_rt, 1), else_=0)), 0).label("rt_count"),
+        )
+        .select_from(QuizSession)
+        .join(QuizCompletion, QuizCompletion.session_id == QuizSession.id)
+        .outerjoin(QuestionAttempt, QuestionAttempt.session_id == QuizSession.id)
+        .where(
+            QuizSession.user_id == user_id, QuizSession.deleted_at.is_(None), QuizSession.is_retake.is_(False),
+        )
+        .group_by(QuizSession.id, QuizCompletion.completed_at, QuizCompletion.total_time)
+    )
+    if since is not None:
+        stmt = stmt.where(QuizCompletion.completed_at >= since)
+    rows = (await db.execute(stmt)).all()
+    return [
+        DailySessionRow(
+            session_id=r.session_id,
+            completed_at=as_utc(r.completed_at),
+            study_time=float(r.study_time or 0.0),
+            graded_count=int(r.graded_count),
+            correct_count=int(r.correct_count),
+            response_time_sum=float(r.rt_sum),
+            response_time_count=int(r.rt_count),
+        )
+        for r in rows
+    ]
 
 
 async def fetch_trend_attempt_rows(db: AsyncSession, user_id: int) -> list[TrendAttemptRow]:

@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
+from app.core.config import settings
 from app.models.question import Question
 from app.models.quiz_session import QuestionAttempt, QuizSession
 from app.models.quiz_tracking import QuizCompletion
@@ -400,3 +401,46 @@ async def test_grinding_one_lesson_is_unaffected_for_grade_without_curriculum(db
     # No curriculum data for grade 7 -> subject mastery tracks the one
     # practiced lesson closely, same as before this feature existed.
     assert subject_row.mastery_score > lesson_row.mastery_score - 10.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Promotion requirements exposed separately (skill vs practice)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _row(difficulty: str, mastery_score: float, evidence_count: int) -> SubjectMastery:
+    return SubjectMastery(
+        user_id=1, subject="Mathematics", difficulty=difficulty, mastery_score=mastery_score,
+        evidence_count=evidence_count, consecutive_strong=0, consecutive_weak=0,
+    )
+
+
+def test_describe_exposes_each_promotion_requirement_separately():
+    # Nearly mastered but short on practice: readiness shows only the lower (practice) side.
+    described = difficulty_service.describe_subject_mastery(_row("easy", 62.3, 10))
+
+    assert described["promotion_mastery_score"] == 62.3
+    assert described["promotion_mastery_required"] == settings.ADAPTIVE_MASTERY_EASY_TO_MEDIUM_THRESHOLD
+    assert described["promotion_questions_answered"] == 10
+    assert described["promotion_questions_required"] == settings.ADAPTIVE_MASTERY_EASY_TO_MEDIUM_MIN_EVIDENCE_COUNT
+    practice_ratio = 10 / settings.ADAPTIVE_MASTERY_EASY_TO_MEDIUM_MIN_EVIDENCE_COUNT * 100
+    assert described["promotion_readiness"] == round(practice_ratio, 2)
+
+
+def test_describe_uses_medium_to_hard_requirements_on_medium():
+    described = difficulty_service.describe_subject_mastery(_row("medium", 70.0, 30))
+    assert described["promotion_mastery_required"] == settings.ADAPTIVE_MASTERY_MEDIUM_TO_HARD_THRESHOLD
+    assert described["promotion_questions_required"] == settings.ADAPTIVE_MASTERY_MEDIUM_TO_HARD_MIN_EVIDENCE_COUNT
+
+
+def test_describe_has_no_requirements_at_highest_difficulty():
+    described = difficulty_service.describe_subject_mastery(_row("hard", 90.0, 40))
+    assert described["promotion_mastery_required"] is None
+    assert described["promotion_questions_required"] is None
+    assert described["promotion_questions_answered"] == 40
+
+
+def test_describe_defaults_without_a_mastery_row():
+    described = difficulty_service.describe_subject_mastery(None)
+    assert described["promotion_mastery_score"] == 50.0
+    assert described["promotion_questions_answered"] == 0
+    assert described["promotion_questions_required"] == settings.ADAPTIVE_MASTERY_EASY_TO_MEDIUM_MIN_EVIDENCE_COUNT
