@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import BaseModel
 
@@ -22,6 +22,42 @@ class AccuracyHistoryPoint(BaseModel):
     correct: int
     total: int
     accuracy: float
+
+
+class DailyActivityPoint(BaseModel):
+    # One local calendar day. accuracy / avg_response_time are null on days with no graded answers.
+    date: date
+    quizzes_completed: int
+    questions_answered: int
+    correct_answers: int
+    accuracy: float | None
+    study_time_seconds: float
+    avg_response_time: float | None
+    # Daily Progress Score (0-100) and its three components; all null on days with no graded answers.
+    # baseline_accuracy is the student's accuracy over everything before this day (null with no prior history).
+    baseline_accuracy: float | None
+    progress_score: float | None
+    score_accuracy: float | None
+    score_improvement: float | None
+    score_effort: float | None
+
+
+class DailyAnalyticsResponse(BaseModel):
+    # GET /analytics/daily: completed, non-deleted, non-retake quizzes (the same set the rest of analytics uses)
+    # bucketed by the local date they were completed on in `timezone`, oldest day first, zero-activity days included.
+    days: int
+    timezone: str
+    start_date: date
+    end_date: date
+    active_days: int
+    total_quizzes_completed: int
+    total_questions_answered: int
+    total_correct_answers: int
+    accuracy: float | None
+    total_study_time_seconds: float
+    avg_response_time: float | None
+    weekly_progress_score: float | None  # mean of the active days' progress_score
+    daily: list[DailyActivityPoint]
 
 
 class MasteryComponents(BaseModel):
@@ -136,6 +172,13 @@ class SubjectAnalytics(BaseModel):
     quizzes_required_for_promotion: int
     promotion_progress_percentage: float
     promotion_readiness: float
+    # The two requirements behind promotion_readiness (= the lower of the two progress ratios): the adaptive mastery
+    # score vs the level-up threshold, and questions answered vs the minimum evidence. *_required are null at the
+    # highest difficulty.
+    promotion_mastery_score: float = 0.0
+    promotion_mastery_required: float | None = None
+    promotion_questions_answered: int = 0
+    promotion_questions_required: int | None = None
     next_difficulty: str
     difficulty_status_message: str
 

@@ -319,3 +319,56 @@ async def test_separate_mastery_states_per_subject(client, db_session):
     # No cross-contamination between the two subjects' difficulty_performance.
     assert _difficulty_bucket(maths, "easy")["total_attempted"] == 10
     assert _difficulty_bucket(science, "easy")["total_attempted"] == 20
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Level-up as the app sees it: the level badge (current_difficulty), the bar
+# (promotion_progress_percentage) and the Skill / Practice targets must all
+# move to the NEXT tier's requirements the moment a promotion happens.
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def test_level_up_moves_badge_bar_and_targets_to_next_tier(client, db_session):
+    user = await get_or_create_user(db_session, TEST_CLERK_ID)
+
+    # Before: one strong easy quiz -- still easy, working towards medium.
+    await _submit_quiz(db_session, user.id, "Mathematics", "easy", 10, 8)
+    before = _subject((await client.get("/api/v1/analytics/me")).json(), "Mathematics")
+    assert before["current_difficulty"] == "easy"
+    assert before["next_difficulty"] == "medium"
+    assert before["promotion_mastery_required"] == 65.0
+    assert before["promotion_questions_required"] == 15
+    assert before["promotion_questions_answered"] == 10
+    assert 0 < before["promotion_progress_percentage"] < 100
+
+    # After: a second strong quiz crosses both easy->medium requirements (see
+    # test_two_consecutive_strong_quizzes_promotes) and promotes.
+    await _submit_quiz(db_session, user.id, "Mathematics", "easy", 10, 9)
+    after = _subject((await client.get("/api/v1/analytics/me")).json(), "Mathematics")
+    assert after["current_difficulty"] == "medium"
+    assert after["next_difficulty"] == "hard"
+    # Targets switch to the medium->hard requirements; earned evidence carries over.
+    assert after["promotion_mastery_required"] == 82.0
+    assert after["promotion_questions_required"] == 25
+    assert after["promotion_questions_answered"] == 20
+    assert after["promotion_mastery_score"] >= 65.0
+    # The bar restarts against the harder targets instead of sitting at 100%.
+    assert after["promotion_progress_percentage"] < 100
+    assert after["promotion_progress_percentage"] == min(
+        round(after["promotion_mastery_score"] / 82.0 * 100, 2), round(20 / 25 * 100, 2),
+    )
+
+
+async def test_top_level_reports_no_further_targets(client, db_session):
+    user = await get_or_create_user(db_session, TEST_CLERK_ID)
+    await _submit_quiz(db_session, user.id, "Science", "hard", 10, 9, update_mastery=False)
+    db_session.add(SubjectMastery(
+        user_id=user.id, subject="Science", difficulty="hard", mastery_score=90.0,
+        evidence_count=40, consecutive_strong=0, consecutive_weak=0,
+    ))
+    await db_session.commit()
+
+    subj = _subject((await client.get("/api/v1/analytics/me")).json(), "Science")
+    assert subj["current_difficulty"] == "hard"
+    assert subj["next_difficulty"] == "hard"  # the app treats next == current as "top level"
+    assert subj["promotion_mastery_required"] is None
+    assert subj["promotion_questions_required"] is None

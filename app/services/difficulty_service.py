@@ -508,6 +508,11 @@ def describe_subject_mastery(mastery: SubjectMastery | None) -> dict:
     requirements = _promotion_requirements(current_difficulty)
     demotion_threshold = _demotion_threshold(current_difficulty)
 
+    # The two promotion requirements, exposed separately so the client can show which one is holding the student
+    # back (promotion_readiness is just the lower of the two and hides that). None at the top tier.
+    promotion_mastery_required: float | None = None
+    promotion_questions_required: int | None = None
+
     if at_max_difficulty or requirements is None:
         promotion_threshold = 100.0
         quizzes_required_for_promotion = 0
@@ -516,6 +521,8 @@ def describe_subject_mastery(mastery: SubjectMastery | None) -> dict:
         mastery_threshold, min_evidence, min_completions = requirements
         promotion_threshold = mastery_threshold
         quizzes_required_for_promotion = min_completions
+        promotion_mastery_required = mastery_threshold
+        promotion_questions_required = min_evidence
         mastery_progress = _clamp_percentage(mastery_score / mastery_threshold * 100.0) if mastery_threshold > 0 else 100.0
         evidence_progress = _clamp_percentage(evidence_count / min_evidence * 100.0) if min_evidence > 0 else 100.0
         promotion_readiness = round(min(mastery_progress, evidence_progress), 2)
@@ -540,4 +547,8 @@ def describe_subject_mastery(mastery: SubjectMastery | None) -> dict:
         "next_difficulty": next_difficulty,
         "difficulty_status_message": message,
         "promotion_readiness": promotion_readiness,
+        "promotion_mastery_score": round(mastery_score, 1),
+        "promotion_mastery_required": promotion_mastery_required,
+        "promotion_questions_answered": evidence_count,
+        "promotion_questions_required": promotion_questions_required,
     }
