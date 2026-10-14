@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.core.config import settings
 from app.services.analytics.types import TrendAttemptRow
@@ -12,7 +12,7 @@ class TrendAnalyticsService:
 
     def __init__(self, trend_attempt_rows: list[TrendAttemptRow], session_completed_at: dict[int, datetime]):
         self._session_completed_at = session_completed_at
-        self._now = datetime.now(timezone.utc)
+        self._now = datetime.now(UTC)
 
         self.overall_session_stats: dict[int, dict[str, int]] = {}
         self.subject_session_stats: dict[str, dict[int, dict[str, int]]] = {}

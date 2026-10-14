@@ -42,7 +42,8 @@ ENV PATH="/app/.venv/bin:$PATH"
 # Expose the port that uvicorn will listen on
 EXPOSE 8000
 
-# Start FastAPI with uvicorn
+# Apply pending migrations first (the app only runs create_all in development),
+# then start FastAPI with uvicorn
 # --host 0.0.0.0 makes the server accessible from outside the container.
 # Worker count comes from WEB_CONCURRENCY (defaults to 1, i.e. today's
 # behavior, if unset) rather than a fixed number baked into the image, so
@@ -52,4 +53,4 @@ EXPOSE 8000
 # DB_MAX_OVERFLOW in app/core/config.py) -- multiply by WEB_CONCURRENCY to
 # get the real total connection count against the DB, and keep that under
 # whatever ceiling your DB provider enforces.
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${WEB_CONCURRENCY:-1}"]
+CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${WEB_CONCURRENCY:-1}"]

@@ -1,6 +1,5 @@
 import logging
 from asyncio import to_thread
-from typing import Optional
 
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
@@ -27,9 +26,9 @@ class RetrievalService:
         self,
         query: str,
         *,
-        grade: Optional[int] = None,
-        subject: Optional[str] = None,
-        top_k: Optional[int] = None,
+        grade: int | None = None,
+        subject: str | None = None,
+        top_k: int | None = None,
     ) -> list[SearchResult]:
 
         query_vector = await to_thread(self.embedder.embed_single, query)
@@ -68,7 +67,7 @@ class RetrievalService:
         return [r for r in reranked if r.score >= self.threshold]
 
     @staticmethod
-    def _build_filter(*, grade: Optional[int], subject: Optional[str]) -> Optional[Filter]:
+    def _build_filter(*, grade: int | None, subject: str | None) -> Filter | None:
         must = []
 
         if grade is not None:

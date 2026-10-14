@@ -13,7 +13,7 @@ is mocked for deterministic, network-free control over success/failure, the
 same way this project's other tests avoid the real Groq/full-submission
 pipeline for anything unrelated to what's under test.
 """
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException, status
@@ -273,7 +273,7 @@ async def test_telemetry_endpoint_allowed_in_production_for_admin(client, db_ses
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def test_telemetry_endpoint_date_range_filtering(client, db_session):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     old_event = AIGenerationEvent(
         subject="OldSubject", requested_question_count=5, generated_question_count=5,
         provider="groq", model_name="test-model", success=True, used_cache_fallback=False,

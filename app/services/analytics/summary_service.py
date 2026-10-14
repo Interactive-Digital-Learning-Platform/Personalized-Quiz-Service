@@ -1,6 +1,13 @@
 from app.core.config import settings
-from app.services.analytics.types import GradedTotals, ResponseTimeRow, SessionCompletionStats
-from app.services.scoring_service import classify_answering_behavior, compute_median_and_stddev
+from app.services.analytics.types import (
+    GradedTotals,
+    ResponseTimeRow,
+    SessionCompletionStats,
+)
+from app.services.scoring_service import (
+    classify_answering_behavior,
+    compute_median_and_stddev,
+)
 
 
 def compute_response_time_stats(entries: list[ResponseTimeRow]) -> dict:

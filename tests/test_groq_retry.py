@@ -12,10 +12,16 @@ Context: added alongside a fix for "quiz generation fails most of the time"
 generate_questions() fail immediately with zero retries, forcing a fallback
 to the (often-empty) DB cache. See app/services/quiz_service.generate_quiz().
 """
+from unittest.mock import AsyncMock, patch
+
 import httpx
 import pytest
-from groq import APIConnectionError, BadRequestError, GroqError, InternalServerError, RateLimitError
-from unittest.mock import AsyncMock, patch
+from groq import (
+    APIConnectionError,
+    BadRequestError,
+    InternalServerError,
+    RateLimitError,
+)
 
 from app.core.config import settings
 from app.services import groq_service

@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from app.core.config import settings
 from app.services import growth_service as growth_formulas
@@ -37,7 +37,7 @@ class GrowthAnalyticsService:
 
         # Same "incomplete + inactive longer than the threshold" definition
         # as the all-time abandoned_sessions figure, just scoped to this window.
-        abandoned_cutoff = datetime.now(timezone.utc) - timedelta(hours=settings.ANALYTICS_ABANDONED_AFTER_HOURS)
+        abandoned_cutoff = datetime.now(UTC) - timedelta(hours=settings.ANALYTICS_ABANDONED_AFTER_HOURS)
         abandoned_in_window = sum(
             1
             for row in self._growth_session_rows
