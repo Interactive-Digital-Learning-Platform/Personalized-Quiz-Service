@@ -7,7 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
-from app.core.security import get_current_user
+from app.core.rate_limit import rate_limit
+from app.core.security import ClerkId, get_current_user
 from app.models.question import Question
 from app.models.quiz_session import QuizSession
 from app.models.quiz_tracking import QuizCompletion, QuizProgressSnapshot
@@ -15,6 +16,7 @@ from app.schemas.quiz import (
     GenerateQuizRequest,
     GenerateQuizResponse,
     QuestionOut,
+    QuestionPublic,
     QuizQuoteRequest,
     QuizQuoteResponse,
     QuizSessionSummary,
@@ -67,6 +69,7 @@ async def get_curriculum(
     "/generate",
     response_model=GenerateQuizResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit("quiz_generate", "RATE_LIMIT_QUIZ_GENERATE"))],
     summary="Generate a quiz",
     description=(
         "Generates a set of quiz questions for the given subject, lesson, and difficulty. "
@@ -75,17 +78,10 @@ async def get_curriculum(
     ),
 )
 async def generate_quiz_endpoint(
+    clerk_id: ClerkId,
     payload: GenerateQuizRequest,
-    current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> GenerateQuizResponse:
-    clerk_id: str = current_user.get("sub", "")
-    if not clerk_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token is missing the 'sub' (user ID) claim.",
-        )
-
     logger.info(
         "Generate quiz request: clerk_id=%s, subject=%s, lesson=%s (override), difficulty=%s (override), count=%d",
         clerk_id, payload.subject, payload.lesson, payload.difficulty, payload.question_count,
@@ -97,8 +93,8 @@ async def generate_quiz_endpoint(
         payload=payload,
     )
 
-    # QuestionOut never carries correct_answer — don't let it leak to the client here.
-    question_out = [QuestionOut.model_validate(q) for q in questions]
+    # QuestionPublic has no correct_answer field at all, so the answer key can't leak here.
+    question_out = [QuestionPublic.model_validate(q) for q in questions]
 
     return GenerateQuizResponse(
         session_id=session.id,
@@ -122,17 +118,10 @@ async def generate_quiz_endpoint(
     ),
 )
 async def retake_quiz_session(
+    clerk_id: ClerkId,
     session_id: int,
-    current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> RetakeSessionResponse:
-    clerk_id: str = current_user.get("sub", "")
-    if not clerk_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token is missing the 'sub' (user ID) claim.",
-        )
-
     retake = await create_retake_session(db=db, clerk_id=clerk_id, session_id=session_id)
     return RetakeSessionResponse(session_id=retake.id)
 
@@ -144,16 +133,9 @@ async def retake_quiz_session(
     summary="List the current user's quiz sessions",
 )
 async def list_quiz_sessions(
-    current_user: dict = Depends(get_current_user),
+    clerk_id: ClerkId,
     db: AsyncSession = Depends(get_db),
 ) -> list[QuizSessionSummary]:
-    clerk_id: str = current_user.get("sub", "")
-    if not clerk_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token is missing the 'sub' claim.",
-        )
-
     user = await get_or_create_user(db=db, clerk_id=clerk_id)
 
     sessions_result = await db.execute(
@@ -213,17 +195,10 @@ async def list_quiz_sessions(
     description="Retrieves a previously generated quiz session and its saved question snapshot from the database.",
 )
 async def get_saved_quiz_session(
+    clerk_id: ClerkId,
     session_id: int,
-    current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> SavedQuizResponse:
-    clerk_id: str = current_user.get("sub", "")
-    if not clerk_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token is missing the 'sub' (user ID) claim.",
-        )
-
     user = await get_or_create_user(db=db, clerk_id=clerk_id)
 
     session_stmt = select(QuizSession).where(
@@ -240,19 +215,31 @@ async def get_saved_quiz_session(
             detail="Quiz session not found.",
         )
 
-    questions_data = session.questions_snapshot or []
-    question_ids = [question.get("id") for question in questions_data if question.get("id") is not None]
-    question_result = await db.execute(select(Question).where(Question.id.in_(question_ids)))
-    question_map = {question.id: question for question in question_result.scalars().all()}
+    completion_result = await db.execute(
+        select(QuizCompletion).where(QuizCompletion.session_id == session.id)
+    )
+    completion = completion_result.scalar_one_or_none()
 
+    questions_data = session.questions_snapshot or []
     questions = []
-    for question in questions_data:
-        enriched_question = dict(question)
-        question_id = question.get("id")
-        db_question = question_map.get(question_id) if question_id is not None else None
-        if db_question is not None and enriched_question.get("correct_answer") is None:
-            enriched_question["correct_answer"] = db_question.correct_answer
-        questions.append(QuestionOut.model_validate(enriched_question))
+    if completion is None:
+        # Still in progress (resume) -- serve the questions without the answer key.
+        for question in questions_data:
+            public = QuestionPublic.model_validate(question)
+            questions.append(QuestionOut(**public.model_dump()))
+    else:
+        # Completed: the answers are part of the review, fill them in from the
+        # snapshot (or the live row, for snapshots written before it carried them).
+        question_ids = [question.get("id") for question in questions_data if question.get("id") is not None]
+        question_result = await db.execute(select(Question).where(Question.id.in_(question_ids)))
+        question_map = {question.id: question for question in question_result.scalars().all()}
+        for question in questions_data:
+            enriched_question = dict(question)
+            question_id = question.get("id")
+            db_question = question_map.get(question_id) if question_id is not None else None
+            if db_question is not None and enriched_question.get("correct_answer") is None:
+                enriched_question["correct_answer"] = db_question.correct_answer
+            questions.append(QuestionOut.model_validate(enriched_question))
 
     progress_result = await db.execute(
         select(QuizProgressSnapshot)
@@ -261,11 +248,6 @@ async def get_saved_quiz_session(
         .limit(1)
     )
     latest_progress = progress_result.scalar_one_or_none()
-
-    completion_result = await db.execute(
-        select(QuizCompletion).where(QuizCompletion.session_id == session.id)
-    )
-    completion = completion_result.scalar_one_or_none()
 
     return SavedQuizResponse(
         session_id=session.id,
@@ -311,18 +293,11 @@ async def get_saved_quiz_session(
     summary="Delete a quiz session",
 )
 async def delete_quiz_session(
+    clerk_id: ClerkId,
     session_id: int,
-    current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     # We don't actually delete the row here — see the comment further down.
-    clerk_id: str = current_user.get("sub", "")
-    if not clerk_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token is missing the 'sub' claim.",
-        )
-
     user = await get_or_create_user(db=db, clerk_id=clerk_id)
 
     result = await db.execute(
@@ -350,7 +325,12 @@ async def delete_quiz_session(
     # The old per-subject Analytics row only updates when you submit a quiz,
     # so if we don't touch it here it'll keep counting this session's answers
     # until the next submission overwrites it. Recompute it now so it's not stale.
-    await update_analytics_after_submission(db=db, clerk_id=clerk_id, session_id=session_id)
+    # The delete is already committed, so a failure here must not turn into a 500 for the client.
+    try:
+        await update_analytics_after_submission(db=db, clerk_id=clerk_id, session_id=session_id)
+    except Exception as exc:  # noqa: BLE001 — non-critical, same as after submit
+        await db.rollback()
+        logger.error("Analytics refresh after delete failed (non-critical): %s", exc)
 
 
 @router.post(
@@ -364,17 +344,10 @@ async def delete_quiz_session(
     ),
 )
 async def save_progress_endpoint(
+    clerk_id: ClerkId,
     payload: SaveProgressRequest,
-    current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> SaveProgressResponse:
-    clerk_id: str = current_user.get("sub", "")
-    if not clerk_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token is missing the 'sub' (user ID) claim.",
-        )
-
     progress = await save_quiz_progress(db=db, clerk_id=clerk_id, payload=payload)
     return SaveProgressResponse(**progress)
 
@@ -391,17 +364,10 @@ async def save_progress_endpoint(
     ),
 )
 async def submit_quiz_endpoint(
+    clerk_id: ClerkId,
     payload: SubmitQuizRequest,
-    current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> SubmitQuizResponse:
-    clerk_id: str = current_user.get("sub", "")
-    if not clerk_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token is missing the 'sub' (user ID) claim.",
-        )
-
     logger.info(
         "Quiz submission: clerk_id=%s, session_id=%d, answer_count=%d",
         clerk_id, payload.session_id, len(payload.answers),
@@ -434,17 +400,10 @@ async def submit_quiz_endpoint(
     ),
 )
 async def submit_timeout_quiz_endpoint(
+    clerk_id: ClerkId,
     payload: SubmitQuizRequest,
-    current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> SubmitQuizResponse:
-    clerk_id: str = current_user.get("sub", "")
-    if not clerk_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token is missing the 'sub' (user ID) claim.",
-        )
-
     timeout_payload = payload.model_copy(update={"ended_by": "timeout"})
     metrics = await submit_quiz(db=db, clerk_id=clerk_id, payload=timeout_payload)
     is_retake = metrics.pop("is_retake")
@@ -466,6 +425,7 @@ async def submit_timeout_quiz_endpoint(
     "/motivational-quote",
     response_model=QuizQuoteResponse,
     status_code=status.HTTP_200_OK,
+    dependencies=[Depends(rate_limit("motivational_quote", "RATE_LIMIT_MOTIVATIONAL_QUOTE"))],
     summary="Get an AI-generated motivational quote for a quiz result",
     description=(
         "Generates a short, original motivational quote reacting to the given "
@@ -475,16 +435,9 @@ async def submit_timeout_quiz_endpoint(
     ),
 )
 async def get_motivational_quote(
+    clerk_id: ClerkId,
     payload: QuizQuoteRequest,
-    current_user: dict = Depends(get_current_user),
 ) -> QuizQuoteResponse:
-    clerk_id: str = current_user.get("sub", "")
-    if not clerk_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token is missing the 'sub' (user ID) claim.",
-        )
-
     quote = await generate_motivational_quote(
         subject=payload.subject,
         difficulty=payload.difficulty,

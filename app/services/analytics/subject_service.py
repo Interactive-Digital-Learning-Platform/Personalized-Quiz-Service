@@ -1,12 +1,20 @@
-from app.core.config import settings
 from app.models.analytics import Analytics
 from app.models.subject_mastery import SubjectMastery
 from app.services import difficulty_service
 from app.services.analytics.mastery_service import MasteryScoreService
-from app.services.analytics.repeated_mistake_service import RepeatedMistakeAnalyticsService
-from app.services.analytics.summary_service import compute_answering_behavior, compute_response_time_stats
+from app.services.analytics.repeated_mistake_service import (
+    RepeatedMistakeAnalyticsService,
+)
+from app.services.analytics.summary_service import (
+    compute_answering_behavior,
+    compute_response_time_stats,
+)
 from app.services.analytics.trend_service import TrendAnalyticsService
-from app.services.analytics.types import DifficultyAttemptRow, DifficultySessionRow, ResponseTimeRow
+from app.services.analytics.types import (
+    DifficultyAttemptRow,
+    DifficultySessionRow,
+    ResponseTimeRow,
+)
 
 
 def _build_adaptive_mastery_detail(mastery: SubjectMastery | None) -> dict | None:

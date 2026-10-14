@@ -6,7 +6,7 @@ formula itself is unit-tested independently in tests/test_growth_service.py;
 these tests verify it's wired up correctly end-to-end (real DB, real HTTP
 response, real rolling-window filtering).
 """
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from app.core.config import settings
 from app.models.question import Question
@@ -17,7 +17,7 @@ from app.services.analytics_service import update_analytics_after_submission
 from app.services.quiz_service import get_or_create_user
 from tests.conftest import TEST_CLERK_ID
 
-NOW = datetime.now(timezone.utc)
+NOW = datetime.now(UTC)
 
 
 async def _submit_quiz(

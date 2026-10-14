@@ -1,13 +1,22 @@
+import hashlib
+import json
 import logging
-from datetime import datetime, timezone
+import time
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.database import get_db
-from app.core.security import get_current_user, require_admin_or_dev
-from app.schemas.analytics import AIFeedbackResponse, DailyAnalyticsResponse, UserAnalyticsResponse
+from app.core.rate_limit import rate_limit
+from app.core.security import ClerkId, require_admin_or_dev
+from app.schemas.analytics import (
+    AIFeedbackResponse,
+    DailyAnalyticsResponse,
+    UserAnalyticsResponse,
+)
 from app.schemas.system_analytics import AIGenerationAnalyticsResponse
 from app.services.analytics.daily_service import get_daily_analytics
 from app.services.analytics_service import get_user_analytics
@@ -20,6 +29,15 @@ router = APIRouter(prefix="/analytics", tags=["Analytics"])
 
 # 14 lets the profile compare this week against the week before.
 DAILY_WINDOW_DAYS = {7, 14, 30}
+
+# clerk_id -> (summary hash, expires at [monotonic], response). The feedback only
+# changes when the analytics behind it do, so reopening the profile shouldn't
+# cost a Groq call each time. Per process, like the rate limiter.
+_feedback_cache: dict[str, tuple[str, float, AIFeedbackResponse]] = {}
+
+
+def _summary_hash(summary: dict) -> str:
+    return hashlib.sha256(json.dumps(summary, sort_keys=True, default=str).encode()).hexdigest()
 
 
 @router.get(
@@ -36,16 +54,9 @@ DAILY_WINDOW_DAYS = {7, 14, 30}
     ),
 )
 async def get_my_analytics(
-    current_user: dict = Depends(get_current_user),
+    clerk_id: ClerkId,
     db: AsyncSession = Depends(get_db),
 ) -> UserAnalyticsResponse:
-    clerk_id: str = current_user.get("sub", "")
-    if not clerk_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token is missing the 'sub' (user ID) claim.",
-        )
-
     logger.info("GET /analytics/me — clerk_id=%s", clerk_id)
 
     analytics_data = await get_user_analytics(db=db, clerk_id=clerk_id)
@@ -66,17 +77,11 @@ async def get_my_analytics(
     ),
 )
 async def get_my_daily_analytics(
+    clerk_id: ClerkId,
     days: int = Query(7, description="Window length: 7, 14 or 30 days."),
     tz: str = Query("UTC", description="IANA timezone name used for day boundaries."),
-    current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> DailyAnalyticsResponse:
-    clerk_id: str = current_user.get("sub", "")
-    if not clerk_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token is missing the 'sub' (user ID) claim.",
-        )
     if days not in DAILY_WINDOW_DAYS:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -100,6 +105,7 @@ async def get_my_daily_analytics(
     "/feedback",
     response_model=AIFeedbackResponse,
     status_code=status.HTTP_200_OK,
+    dependencies=[Depends(rate_limit("ai_feedback", "RATE_LIMIT_AI_FEEDBACK"))],
     summary="Get AI feedback",
     description=(
         "Pulls the user's latest analytics from the DB, feeds it to the Groq AI, "
@@ -111,6 +117,7 @@ async def get_my_daily_analytics(
     "/feedback",
     response_model=AIFeedbackResponse,
     status_code=status.HTTP_200_OK,
+    dependencies=[Depends(rate_limit("ai_feedback", "RATE_LIMIT_AI_FEEDBACK"))],
     summary="Get AI feedback",
     description=(
         "Pulls the user's latest analytics from the DB, feeds it to the Groq AI, "
@@ -118,16 +125,9 @@ async def get_my_daily_analytics(
     ),
 )
 async def get_ai_feedback(
-    current_user: dict = Depends(get_current_user),
+    clerk_id: ClerkId,
     db: AsyncSession = Depends(get_db),
 ) -> AIFeedbackResponse:
-    clerk_id: str = current_user.get("sub", "")
-    if not clerk_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token is missing the 'sub' (user ID) claim.",
-        )
-
     logger.info("GET /analytics/feedback — clerk_id=%s", clerk_id)
 
     analytics_data = await get_user_analytics(db=db, clerk_id=clerk_id)
@@ -144,7 +144,7 @@ async def get_ai_feedback(
                 "Welcome! Your learning journey starts with a single quiz. "
                 "Take your first one to unlock personalised insights."
             ),
-            generated_at=datetime.now(timezone.utc),
+            generated_at=datetime.now(UTC),
         )
 
     # Trimmed down on purpose — the full subjects[] payload carries every
@@ -172,15 +172,26 @@ async def get_ai_feedback(
         "recommendations": analytics_data["recommendations"],
     }
 
+    summary_hash = _summary_hash(analytics_summary)
+    cached = _feedback_cache.get(clerk_id)
+    if cached and cached[0] == summary_hash and cached[1] > time.monotonic():
+        return cached[2]
+
     feedback_data = await generate_feedback(analytics_summary)
 
-    return AIFeedbackResponse(
+    response = AIFeedbackResponse(
         weak_areas=feedback_data.get("weak_areas", []),
         strong_areas=feedback_data.get("strong_areas", []),
         suggestions=feedback_data.get("suggestions", []),
         motivational_note=feedback_data.get("motivational_note", ""),
-        generated_at=datetime.now(timezone.utc),
+        generated_at=datetime.now(UTC),
     )
+    # Don't pin the generic fallback (Groq returned non-JSON) for hours -- only real feedback.
+    if response.weak_areas or response.strong_areas:
+        _feedback_cache[clerk_id] = (
+            summary_hash, time.monotonic() + settings.AI_FEEDBACK_CACHE_TTL_SECONDS, response,
+        )
+    return response
 
 
 @router.get(

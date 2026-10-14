@@ -1,5 +1,5 @@
 from collections import defaultdict
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -121,4 +121,4 @@ async def get_daily_analytics(db: AsyncSession, clerk_id: str, *, days: int, tz:
     user = await get_or_create_user(db, clerk_id)
     # Full history, not just the window: each day's progress score compares it against everything before it.
     rows = await queries.fetch_daily_session_rows(db, user.id)
-    return build_daily_analytics(rows, days=days, tz=tz, now=datetime.now(timezone.utc))
+    return build_daily_analytics(rows, days=days, tz=tz, now=datetime.now(UTC))

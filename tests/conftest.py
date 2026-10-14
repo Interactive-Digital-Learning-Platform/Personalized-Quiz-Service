@@ -25,6 +25,8 @@ from sqlalchemy.pool import StaticPool
 # latter rebinds the local name `app` to the top-level package, clobbering
 # the `from app.main import app` FastAPI instance imported below.
 from app import models as _app_models  # noqa: F401
+from app.api.routes import analytics as analytics_routes
+from app.core import rate_limit
 from app.core.database import Base, get_db
 from app.core.security import get_current_user
 from app.main import app
@@ -43,6 +45,16 @@ def _no_real_pool_replenish(monkeypatch):
     # test's event loop/session has already torn down. Tests that want to
     # assert replenish-triggering behavior patch this back themselves.
     monkeypatch.setattr(quiz_service, "_kickoff_pool_replenish", lambda *a, **k: None)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_rate_limits_and_feedback_cache():
+    # Both are module-level, per-process state; reset so tests don't leak into each other.
+    rate_limit.reset()
+    analytics_routes._feedback_cache.clear()
+    yield
+    rate_limit.reset()
+    analytics_routes._feedback_cache.clear()
 
 
 @pytest_asyncio.fixture

@@ -12,7 +12,7 @@ or /quiz/submit, since those exercise the real Groq API and full grading
 pipeline — unrelated to what's being tested here (see test_analytics.py for
 the same rationale).
 """
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -106,7 +106,7 @@ async def test_active_incomplete_session_is_not_abandoned(client, db_session):
     session = await _make_session(db_session, user.id, "Science", question_count=8)
     await db_session.commit()
     # Saved progress 1 hour ago — well within the 24h abandonment threshold.
-    await _save_progress(db_session, session, datetime.now(timezone.utc) - timedelta(hours=1))
+    await _save_progress(db_session, session, datetime.now(UTC) - timedelta(hours=1))
 
     resp = await client.get("/api/v1/analytics/me")
     assert resp.status_code == 200
@@ -125,7 +125,7 @@ async def test_active_incomplete_session_is_not_abandoned(client, db_session):
 
 async def test_abandoned_session_is_classified_correctly(client, db_session):
     user = await get_or_create_user(db_session, TEST_CLERK_ID)
-    old_time = datetime.now(timezone.utc) - timedelta(
+    old_time = datetime.now(UTC) - timedelta(
         hours=settings.ANALYTICS_ABANDONED_AFTER_HOURS + 1
     )
     session = await _make_session(db_session, user.id, "History", question_count=6)
@@ -144,7 +144,7 @@ async def test_abandoned_session_is_classified_correctly(client, db_session):
 async def test_incomplete_session_with_no_snapshot_uses_created_at(client, db_session):
     """An incomplete session that was never saved falls back to created_at."""
     user = await get_or_create_user(db_session, TEST_CLERK_ID)
-    old_time = datetime.now(timezone.utc) - timedelta(
+    old_time = datetime.now(UTC) - timedelta(
         hours=settings.ANALYTICS_ABANDONED_AFTER_HOURS + 5
     )
     await _make_session(db_session, user.id, "Geography", question_count=5, created_at=old_time)

@@ -3,7 +3,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     PROJECT_NAME: str = "Personalized Quiz Service"
-    ENVIRONMENT: str = "development"
+    # Defaults to the locked-down mode: "development" turns on /docs, CORS *, SQL echo, AUTH_BYPASS and open admin
+    # endpoints, so it has to be opted into explicitly (the local .env sets ENVIRONMENT=development).
+    ENVIRONMENT: str = "production"
 
     DATABASE_URL: str
     # Per-process Postgres connection pool (ignored for the SQLite dev/test
@@ -26,6 +28,15 @@ class Settings(BaseSettings):
     # multiplying calls per tier and risking 429s on a single user action).
     GROQ_MAX_GENERATION_CALLS_PER_REQUEST: int = 4
 
+    # Per-user request caps for the endpoints that call Groq on every request (see app/core/rate_limit.py) -- a
+    # sliding window of RATE_LIMIT_WINDOW_SECONDS. Over the cap -> 429 with Retry-After.
+    RATE_LIMIT_WINDOW_SECONDS: int = 60
+    RATE_LIMIT_QUIZ_GENERATE: int = 6
+    RATE_LIMIT_AI_FEEDBACK: int = 6
+    RATE_LIMIT_MOTIVATIONAL_QUOTE: int = 10
+    # AI feedback is cached per user until the analytics it's based on change (i.e. until the next submission).
+    AI_FEEDBACK_CACHE_TTL_SECONDS: int = 6 * 60 * 60
+
     # Question pool: quiz generation reads pre-generated questions for a
     # (subject, difficulty) bucket first and only calls Groq synchronously
     # for whatever the pool doesn't cover (see
@@ -41,8 +52,14 @@ class Settings(BaseSettings):
     CLERK_JWKS_URL: str
     CLERK_ISSUER: str
     CLERK_AUDIENCE: str | None = None
+    # Comma-separated origins allowed as a token's `azp` claim (e.g. "https://app.example.com"). Empty = no check.
+    CLERK_AUTHORIZED_PARTIES: str = ""
     AUTH_BYPASS: bool = False
     ADMIN_CLERK_IDS: str = ""
+    # Optional Clerk backend secret (sk_...). When set, POST /user/sync takes the username from Clerk's API rather
+    # than trusting the one the client sends.
+    CLERK_SECRET_KEY: str | None = None
+    CLERK_API_URL: str = "https://api.clerk.com/v1"
 
     ANALYTICS_ABANDONED_AFTER_HOURS: int = 24
     ANALYTICS_TOPIC_MIN_ATTEMPTS: int = 3

@@ -10,7 +10,7 @@ Sessions are built directly against the test DB with an explicit
 `completed_at` (same approach as test_analytics_trend.py) so each test
 controls exactly which day a quiz lands on.
 """
-from datetime import datetime, time, timedelta, timezone
+from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from app.services.analytics.daily_service import build_daily_analytics, progress_score
@@ -23,11 +23,11 @@ COLOMBO = ZoneInfo("Asia/Colombo")  # UTC+5:30, no DST
 
 
 def _local_today(tz: ZoneInfo):
-    return datetime.now(timezone.utc).astimezone(tz).date()
+    return datetime.now(UTC).astimezone(tz).date()
 
 
 def _at_local(day, hour: int, minute: int = 0, tz: ZoneInfo = COLOMBO) -> datetime:
-    return datetime.combine(day, time(hour, minute), tzinfo=tz).astimezone(timezone.utc)
+    return datetime.combine(day, time(hour, minute), tzinfo=tz).astimezone(UTC)
 
 
 def _day(data: dict, iso: str) -> dict:
@@ -92,7 +92,7 @@ async def test_excludes_retakes_deleted_and_out_of_window_quizzes(client, db_ses
     deleted = await _make_completed_session(db_session, user.id, "History", 4, 4, _at_local(today, 12))
     await _make_completed_session(db_session, user.id, "History", 4, 4, _at_local(today - timedelta(days=8), 12))
     retake.is_retake = True
-    deleted.deleted_at = datetime.now(timezone.utc)
+    deleted.deleted_at = datetime.now(UTC)
     await db_session.commit()
 
     data = (await client.get("/api/v1/analytics/daily", params={"days": 7, "tz": "Asia/Colombo"})).json()
@@ -124,9 +124,9 @@ async def test_rejects_unsupported_window_and_unknown_timezone(client, db_sessio
 
 
 def test_build_daily_analytics_keeps_no_activity_distinct_from_zero_accuracy():
-    now = datetime(2026, 10, 12, 6, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 10, 12, 6, 0, tzinfo=UTC)
     rows = [DailySessionRow(
-        session_id=1, completed_at=datetime(2026, 10, 12, 4, 0, tzinfo=timezone.utc),
+        session_id=1, completed_at=datetime(2026, 10, 12, 4, 0, tzinfo=UTC),
         study_time=20.0, graded_count=4, correct_count=0, response_time_sum=20.0, response_time_count=4,
     )]
 
