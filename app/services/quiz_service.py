@@ -33,6 +33,7 @@ from app.services import difficulty_mastery_engine as mastery_engine
 from app.services.groq_service import (
     generate_questions,
     generate_shuffle_quiz_questions,
+    references_missing_visual,
 )
 
 logger = logging.getLogger(__name__)
@@ -229,6 +230,9 @@ async def _fetch_pool_questions(
     for candidate in candidates:
         if len(accepted) >= limit:
             break
+        # Rows generated before the text-only rule may point at a graph/table that can't be shown.
+        if references_missing_visual(candidate.question):
+            continue
         if _is_near_duplicate(candidate.question, exclude_texts):
             continue
         accepted.append(candidate)
@@ -351,6 +355,9 @@ async def _fetch_shuffle_fallback_questions(
     for candidate in candidates:
         if len(accepted) >= limit:
             break
+        # Rows generated before the text-only rule may point at a graph/table that can't be shown.
+        if references_missing_visual(candidate.question):
+            continue
         if _is_near_duplicate(candidate.question, exclude_texts):
             continue
         accepted.append(candidate)
@@ -588,10 +595,13 @@ async def _generate_or_cache_tier(
             select(Question)
             .where(*fallback_filter)
             .order_by(func.random())
-            .limit(remaining)
+            .limit(remaining * 3)
         )
         result = await db.execute(cached_stmt)
-        fallback_questions = list(result.scalars().all())
+        # Over-fetched so skipping picture-based rows (see references_missing_visual) still leaves enough.
+        fallback_questions = [
+            q for q in result.scalars().all() if not references_missing_visual(q.question)
+        ][:remaining]
 
         if fallback_questions:
             questions.extend(fallback_questions)
