@@ -6,6 +6,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.ai_generation_event import AIGenerationEvent
+from app.services import provenance_columns
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,7 @@ async def record_generation_event(
     invalid_question_count: int,
     latency_ms: float,
     error_category: str | None,
+    rag_snippet_count: int | None = None,
 ) -> None:
     # Best-effort write, called from a `finally` block in quiz_service.generate_quiz() — a telemetry failure must never break quiz generation, so every exception here is deliberately swallowed.
     try:
@@ -75,6 +77,10 @@ async def record_generation_event(
         )
         db.add(event)
         await db.commit()
+        # Not a mapped column -- written separately, and only once migration f7c1e2d3a4b5 is applied.
+        if provenance_columns.enabled() and rag_snippet_count is not None:
+            await provenance_columns.save_snippet_count(db, event.id, rag_snippet_count)
+            await db.commit()
     except Exception as exc:  # noqa: BLE001 — deliberately broad, see comment above
         logger.error("Failed to record AI generation telemetry (non-critical): %s", exc)
         try:
