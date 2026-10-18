@@ -1,0 +1,81 @@
+{
+  "Science": {
+    "Living tissues": [
+      "Plant tissues",
+      "Animal tissues"
+    ],
+    "Photosynthesis": [
+      "Factors that affect photosynthesis",
+      "Products of photosynthesis",
+      "Importance of photosynthesis"
+    ],
+    "Mixtures": [
+      "Type of mixtures",
+      "Composition of mixtures",
+      "Separation of compounds in mixtures"
+    ],
+    "Waves and their applications": [
+      "Mechanical Waves",
+      "Electromagnetic Waves",
+      "Sound"
+    ],
+    "Geometrical Optics": [
+      "Reflection of light",
+      "Curved (Spherical) Mirrors",
+      "Refraction of Light",
+      "Lenses"
+    ],
+    "Biological processes in human body": [
+      "Process of food digestion",
+      "Process of respiration",
+      "Process of excretion",
+      "Process of blood circulation",
+      "Coordination and homeostasis in human"
+    ],
+    "Acids, bases and salts": [
+      "Acids",
+      "Bases",
+      "Salts",
+      "Neutralisation"
+    ],
+    "Heat": [
+      "Temperature",
+      "Change of state of matter",
+      "Thermal expansion",
+      "Heat transfer"
+    ],
+    "Power and Energy of Electric Appliances": [
+      "Power output of an electric appliance",
+      "Electric energy consumed by electric appliances",
+      "Efficiency of electric appliances and conserving power",
+      "Home electric circuits",
+      "Measuring electric energy in kilowatt hours"
+    ],
+    "Electronics": [
+      "Introduction",
+      "Rectification of Alternating Currents",
+      "Transistors"
+    ],
+    "Electrochemistry": [
+      "Electrochemical cells",
+      "Electrolysis",
+      "Corrosion of metals"
+    ],
+    "Electromagnetism and Electromagnetic Induction": [
+      "Magnetism",
+      "Magnetic effect of a current",
+      "Electromagnetic induction"
+    ],
+    "Hydrocarbons and Their Derivatives": [
+      "Hydrocarbons",
+      "Derivatives of ethene",
+      "Polymers"
+    ],
+    "Biosphere": [
+      "Organizational levels and interactions of biosphere",
+      "Mechanisms involve in maintaining the equilibrium of ecosystems",
+      "Different environmental pollutants and their effects",
+      "Sustainable development and environmental management"
+    ]
+  }
+}

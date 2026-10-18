@@ -1,0 +1,571 @@
+{
+ "_note": "Expected page ranges are 0-based PDF pages (like Qdrant page_start), taken from each book's contents page plus its printed-to-PDF page offset (see PDF-Ingestion-Backend-Service qdrant-migrations/004). keywords are the lesson's subtopic headings from the same contents page.",
+ "cases": [
+  {
+   "grade": 10,
+   "subject": "ICT",
+   "lesson": "Information and Communication Technology",
+   "book": "ICT grade 10.pdf",
+   "expected_pages": [
+    9,
+    39
+   ],
+   "keywords": [],
+   "tagged_chunks": 16
+  },
+  {
+   "grade": 10,
+   "subject": "ICT",
+   "lesson": "Logic Gates with Boolean Functions",
+   "book": "ICT grade 10.pdf",
+   "expected_pages": [
+    116,
+    136
+   ],
+   "keywords": [],
+   "tagged_chunks": 17
+  },
+  {
+   "grade": 10,
+   "subject": "ICT",
+   "lesson": "Electronic Spreadsheet",
+   "book": "ICT grade 10.pdf",
+   "expected_pages": [
+    198,
+    237
+   ],
+   "keywords": [],
+   "tagged_chunks": 45
+  },
+  {
+   "grade": 11,
+   "subject": "ICT",
+   "lesson": "Programming",
+   "book": "ICT grade 11.pdf",
+   "expected_pages": [
+    11,
+    62
+   ],
+   "keywords": [],
+   "tagged_chunks": 55
+  },
+  {
+   "grade": 11,
+   "subject": "ICT",
+   "lesson": "The Internet and the Electronic Mail",
+   "book": "ICT grade 11.pdf",
+   "expected_pages": [
+    74,
+    90
+   ],
+   "keywords": [],
+   "tagged_chunks": 3
+  },
+  {
+   "grade": 11,
+   "subject": "ICT",
+   "lesson": "Use of Multimedia",
+   "book": "ICT grade 11.pdf",
+   "expected_pages": [
+    91,
+    134
+   ],
+   "keywords": [],
+   "tagged_chunks": 32
+  },
+  {
+   "grade": 11,
+   "subject": "English",
+   "lesson": "Our Responsibilities",
+   "book": "english grade 11 work book.pdf",
+   "expected_pages": [
+    11,
+    18
+   ],
+   "keywords": [],
+   "tagged_chunks": 5
+  },
+  {
+   "grade": 11,
+   "subject": "English",
+   "lesson": "For A Better Tomorrow",
+   "book": "english grade 11 work book.pdf",
+   "expected_pages": [
+    39,
+    58
+   ],
+   "keywords": [],
+   "tagged_chunks": 17
+  },
+  {
+   "grade": 11,
+   "subject": "English",
+   "lesson": "A Simple Living",
+   "book": "english grade 11 work book.pdf",
+   "expected_pages": [
+    77,
+    86
+   ],
+   "keywords": [],
+   "tagged_chunks": 7
+  },
+  {
+   "grade": 11,
+   "subject": "Geography",
+   "lesson": "Natural resources of the Earth",
+   "book": "geography grade 11.pdf",
+   "expected_pages": [
+    11,
+    29
+   ],
+   "keywords": [],
+   "tagged_chunks": 17
+  },
+  {
+   "grade": 11,
+   "subject": "Geography",
+   "lesson": "Development",
+   "book": "geography grade 11.pdf",
+   "expected_pages": [
+    82,
+    96
+   ],
+   "keywords": [],
+   "tagged_chunks": 12
+  },
+  {
+   "grade": 11,
+   "subject": "Geography",
+   "lesson": "Natural hazards in Sri Lanka",
+   "book": "geography grade 11.pdf",
+   "expected_pages": [
+    113,
+    125
+   ],
+   "keywords": [],
+   "tagged_chunks": 10
+  },
+  {
+   "grade": 11,
+   "subject": "Health and Physical Education",
+   "lesson": "Let us build a healthy society",
+   "book": "health science grade 11.pdf",
+   "expected_pages": [
+    13,
+    26
+   ],
+   "keywords": [],
+   "tagged_chunks": 9
+  },
+  {
+   "grade": 11,
+   "subject": "Health and Physical Education",
+   "lesson": "Let us learn about running events in athletics",
+   "book": "health science grade 11.pdf",
+   "expected_pages": [
+    91,
+    101
+   ],
+   "keywords": [],
+   "tagged_chunks": 6
+  },
+  {
+   "grade": 11,
+   "subject": "Health and Physical Education",
+   "lesson": "Let us understand the musculoskeletal system",
+   "book": "health science grade 11.pdf",
+   "expected_pages": [
+    151,
+    170
+   ],
+   "keywords": [],
+   "tagged_chunks": 14
+  },
+  {
+   "grade": 10,
+   "subject": "History",
+   "lesson": "Sources of Studying History",
+   "book": "histoy grade 10.pdf",
+   "expected_pages": [
+    12,
+    20
+   ],
+   "keywords": [
+    "Classification of Sources",
+    "Importance of Learning History",
+    "Protecting Archaelogical Sources"
+   ],
+   "tagged_chunks": 17
+  },
+  {
+   "grade": 10,
+   "subject": "History",
+   "lesson": "The Ancient Society of Sri Lanka",
+   "book": "histoy grade 10.pdf",
+   "expected_pages": [
+    55,
+    73
+   ],
+   "keywords": [
+    "The Nature of Ruling",
+    "Economy",
+    "Culture"
+   ],
+   "tagged_chunks": 28
+  },
+  {
+   "grade": 10,
+   "subject": "History",
+   "lesson": "Decline of Ancient Cities in the Dry Zone and Origin of New Kingdoms in South West",
+   "book": "histoy grade 10.pdf",
+   "expected_pages": [
+    102,
+    116
+   ],
+   "keywords": [
+    "Background of the Urban Life",
+    "The First Urbanization",
+    "Downfall of Polonnaruwa",
+    "The Second Urbanization"
+   ],
+   "tagged_chunks": 22
+  },
+  {
+   "grade": 11,
+   "subject": "History",
+   "lesson": "Industrial Revolution",
+   "book": "histoy grade 11.pdf",
+   "expected_pages": [
+    11,
+    28
+   ],
+   "keywords": [],
+   "tagged_chunks": 6
+  },
+  {
+   "grade": 11,
+   "subject": "History",
+   "lesson": "National Renaissance in Sri Lanka",
+   "book": "histoy grade 11.pdf",
+   "expected_pages": [
+    51,
+    60
+   ],
+   "keywords": [],
+   "tagged_chunks": 12
+  },
+  {
+   "grade": 11,
+   "subject": "History",
+   "lesson": "Social Changes in Sri Lanka Under the British",
+   "book": "histoy grade 11.pdf",
+   "expected_pages": [
+    75,
+    88
+   ],
+   "keywords": [],
+   "tagged_chunks": 14
+  },
+  {
+   "grade": 10,
+   "subject": "Mathematics",
+   "lesson": "Perimeter",
+   "book": "mathematics grade 10 part 1.pdf",
+   "expected_pages": [
+    10,
+    22
+   ],
+   "keywords": [],
+   "tagged_chunks": 3
+  },
+  {
+   "grade": 10,
+   "subject": "Mathematics",
+   "lesson": "Area",
+   "book": "mathematics grade 10 part 1.pdf",
+   "expected_pages": [
+    74,
+    82
+   ],
+   "keywords": [],
+   "tagged_chunks": 7
+  },
+  {
+   "grade": 10,
+   "subject": "Mathematics",
+   "lesson": "Data Representation",
+   "book": "mathematics grade 10 part 1.pdf",
+   "expected_pages": [
+    128,
+    137
+   ],
+   "keywords": [],
+   "tagged_chunks": 7
+  },
+  {
+   "grade": 11,
+   "subject": "Mathematics",
+   "lesson": "Surface Area of Solids",
+   "book": "mathematics grade 11 part 1.pdf",
+   "expected_pages": [
+    58,
+    70
+   ],
+   "keywords": [],
+   "tagged_chunks": 4
+  },
+  {
+   "grade": 11,
+   "subject": "Mathematics",
+   "lesson": "Volume of Solids",
+   "book": "mathematics grade 11 part 1.pdf",
+   "expected_pages": [
+    71,
+    81
+   ],
+   "keywords": [],
+   "tagged_chunks": 10
+  },
+  {
+   "grade": 11,
+   "subject": "Mathematics",
+   "lesson": "Binomial Expressions",
+   "book": "mathematics grade 11 part 1.pdf",
+   "expected_pages": [
+    82,
+    87
+   ],
+   "keywords": [],
+   "tagged_chunks": 6
+  },
+  {
+   "grade": 11,
+   "subject": "Mathematics",
+   "lesson": "Equations",
+   "book": "mathematics grade 11 part 2.pdf",
+   "expected_pages": [
+    65,
+    83
+   ],
+   "keywords": [],
+   "tagged_chunks": 15
+  },
+  {
+   "grade": 11,
+   "subject": "Mathematics",
+   "lesson": "Equiangular Triangles",
+   "book": "mathematics grade 11 part 2.pdf",
+   "expected_pages": [
+    84,
+    107
+   ],
+   "keywords": [],
+   "tagged_chunks": 18
+  },
+  {
+   "grade": 11,
+   "subject": "Mathematics",
+   "lesson": "Data representation and Interpretation",
+   "book": "mathematics grade 11 part 2.pdf",
+   "expected_pages": [
+    108,
+    129
+   ],
+   "keywords": [],
+   "tagged_chunks": 19
+  },
+  {
+   "grade": 11,
+   "subject": "Mathematics",
+   "lesson": "Trigonometry",
+   "book": "mathematics grade 11 part 3.pdf",
+   "expected_pages": [
+    21,
+    50
+   ],
+   "keywords": [],
+   "tagged_chunks": 18
+  },
+  {
+   "grade": 11,
+   "subject": "Mathematics",
+   "lesson": "Inequalities",
+   "book": "mathematics grade 11 part 3.pdf",
+   "expected_pages": [
+    66,
+    71
+   ],
+   "keywords": [],
+   "tagged_chunks": 6
+  },
+  {
+   "grade": 11,
+   "subject": "Mathematics",
+   "lesson": "Tangents",
+   "book": "mathematics grade 11 part 3.pdf",
+   "expected_pages": [
+    88,
+    109
+   ],
+   "keywords": [],
+   "tagged_chunks": 12
+  },
+  {
+   "grade": 10,
+   "subject": "Science",
+   "lesson": "Motion in a straight line",
+   "book": "science grade 10 part 1.pdf",
+   "expected_pages": [
+    38,
+    66
+   ],
+   "keywords": [
+    "Distance and displacement",
+    "Speed",
+    "Velocity",
+    "Acceleration",
+    "Displacement - Time graphs",
+    "Velocity - Time graphs"
+   ],
+   "tagged_chunks": 21
+  },
+  {
+   "grade": 10,
+   "subject": "Science",
+   "lesson": "Friction",
+   "book": "science grade 10 part 1.pdf",
+   "expected_pages": [
+    113,
+    124
+   ],
+   "keywords": [
+    "Nature of friction",
+    "Static, limiting and dynamic states of frictional forces",
+    "Factors affecting the limiting frictional force",
+    "Practical applications of friction"
+   ],
+   "tagged_chunks": 9
+  },
+  {
+   "grade": 10,
+   "subject": "Science",
+   "lesson": "Characteristics of organisms",
+   "book": "science grade 10 part 1.pdf",
+   "expected_pages": [
+    154,
+    170
+   ],
+   "keywords": [
+    "Cellular organization",
+    "Nutrition",
+    "Respiration",
+    "Irritability and Co-ordination",
+    "Excretion",
+    "Movement"
+   ],
+   "tagged_chunks": 16
+  },
+  {
+   "grade": 11,
+   "subject": "Science",
+   "lesson": "Living tissues",
+   "book": "science grade 11 part 1.pdf",
+   "expected_pages": [
+    12,
+    30
+   ],
+   "keywords": [
+    "Plant tissues",
+    "Animal tissues",
+    "Plant tissues Let's do the activity",
+    "to study further about how tissues are oraganized in plant organs. Activity -"
+   ],
+   "tagged_chunks": 15
+  },
+  {
+   "grade": 11,
+   "subject": "Science",
+   "lesson": "Mixtures",
+   "book": "science grade 11 part 1.pdf",
+   "expected_pages": [
+    41,
+    82
+   ],
+   "keywords": [
+    "Type of mixtures",
+    "Composition of mixtures",
+    "Separation of compounds in mixtures"
+   ],
+   "tagged_chunks": 39
+  },
+  {
+   "grade": 11,
+   "subject": "Science",
+   "lesson": "Geometrical Optics",
+   "book": "science grade 11 part 1.pdf",
+   "expected_pages": [
+    116,
+    153
+   ],
+   "keywords": [
+    "Reflection of light",
+    "Curved (Spherical) Mirrors",
+    "Refraction of Light",
+    "Lenses"
+   ],
+   "tagged_chunks": 49
+  },
+  {
+   "grade": 11,
+   "subject": "Science",
+   "lesson": "Heat",
+   "book": "science grade 11 part 2.pdf",
+   "expected_pages": [
+    12,
+    42
+   ],
+   "keywords": [
+    "Temperature",
+    "Heat",
+    "Change of state of matter",
+    "Thermal expansion",
+    "Heat transfer"
+   ],
+   "tagged_chunks": 39
+  },
+  {
+   "grade": 11,
+   "subject": "Science",
+   "lesson": "Electronics",
+   "book": "science grade 11 part 2.pdf",
+   "expected_pages": [
+    61,
+    89
+   ],
+   "keywords": [
+    "Introduction",
+    "p – n Junction",
+    "p-n Junction diode",
+    "Rectification of Alternating Currents",
+    "Transistors"
+   ],
+   "tagged_chunks": 21
+  },
+  {
+   "grade": 11,
+   "subject": "Science",
+   "lesson": "Hydrocarbons and Their Derivatives",
+   "book": "science grade 11 part 2.pdf",
+   "expected_pages": [
+    162,
+    177
+   ],
+   "keywords": [
+    "Hydrocarbons",
+    "Derivatives of ethene",
+    "Polymers"
+   ],
+   "tagged_chunks": 18
+  }
+ ]
+}

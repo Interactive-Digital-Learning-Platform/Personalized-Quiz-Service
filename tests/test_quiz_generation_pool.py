@@ -1,12 +1,13 @@
 """
 tests/test_quiz_generation_pool.py
 ─────────────────────────────────────
-Covers the question-pool-first generation design in quiz_service.py:
+Covers the question pool in quiz_service.py and where it sits in generation:
 
-- Quiz generation reads pre-generated questions for a (subject, difficulty,
-  grade) bucket first (_fetch_pool_questions), excluding whatever the
-  requesting user has already been asked (via QuestionAttempt/QuizSession),
-  and only calls Groq synchronously for whatever the pool doesn't cover.
+- Generation is AI-first: Groq grounded in the textbook excerpts, then Groq
+  without excerpts if that fails, and only then the pool. The pool
+  (_fetch_pool_questions) serves pre-generated questions for a (subject,
+  difficulty, grade) bucket, excluding whatever the requesting user has
+  already been asked (via QuestionAttempt/QuizSession).
 - A bucket below settings.POOL_MIN_SIZE triggers a debounced, fire-and-
   forget background top-up (_kickoff_pool_replenish) -- never blocks the
   request that triggered it.
@@ -19,6 +20,7 @@ Covers the question-pool-first generation design in quiz_service.py:
 """
 from unittest.mock import AsyncMock, patch
 
+from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -123,51 +125,81 @@ async def test_pool_serves_a_question_to_a_different_user_who_has_not_seen_it(db
 
 # ── Pool-first ordering: Groq is skipped entirely when the pool covers it ──
 
-async def test_pool_fully_covers_request_groq_never_called(client, db_session):
-    expected_texts = {f"Pool {word} question?" for word in _DISTINCT_WORDS[:3]}
-    for text in expected_texts:
+async def _seed_pool(db_session, n: int = 3) -> set[str]:
+    texts = {f"Pool {word} question?" for word in _DISTINCT_WORDS[:n]}
+    for text in texts:
         db_session.add(Question(
             question=text, options=["A", "B", "C", "D"], correct_answer="A",
             subject="Mathematics", lesson="Fractions", difficulty="easy", grade=10,
         ))
     await db_session.commit()
-
-    with patch(
-        "app.services.quiz_service.generate_questions", new=AsyncMock(),
-    ) as mock_generate:
-        resp = await client.post(
-            GENERATE_URL, json={"subject": "Mathematics", "difficulty": "easy", "question_count": 3},
-        )
-
-    assert resp.status_code == 201
-    mock_generate.assert_not_called()
-    body = resp.json()
-    assert len(body["questions"]) == 3
-    assert {q["question"] for q in body["questions"]} == expected_texts
+    return texts
 
 
-async def test_pool_partial_coverage_calls_groq_for_shortfall_only(client, db_session):
-    db_session.add(Question(
-        question="Pool question only one?", options=["A", "B", "C", "D"], correct_answer="A",
-        subject="Mathematics", lesson="Fractions", difficulty="easy", grade=10,
-    ))
-    await db_session.commit()
+async def test_ai_first_even_when_the_pool_could_cover_the_request(client, db_session):
+    pool_texts = await _seed_pool(db_session)
 
-    async def _side_effect(*, grade, subject, difficulty, question_count, **_kwargs):
-        assert question_count == 2  # only the shortfall, not the full 3
+    async def _side_effect(*, question_count, **_kwargs):
         return [_fresh_question(i) for i in range(question_count)]
 
-    with patch(
-        "app.services.quiz_service.generate_questions", new=AsyncMock(side_effect=_side_effect),
-    ) as mock_generate:
-        resp = await client.post(
-            GENERATE_URL, json={"subject": "Mathematics", "difficulty": "easy", "question_count": 3},
-        )
+    with patch("app.services.quiz_service.generate_questions", new=AsyncMock(side_effect=_side_effect)) as mock_generate:
+        resp = await client.post(GENERATE_URL, json={"subject": "Mathematics", "difficulty": "easy", "question_count": 3})
 
     assert resp.status_code == 201
     assert mock_generate.call_count == 1
-    body = resp.json()
-    assert len(body["questions"]) == 3
+    texts = {q["question"] for q in resp.json()["questions"]}
+    assert len(texts) == 3 and not texts & pool_texts
+    assert resp.json()["cache_hit"] is False
+
+
+async def test_grounded_failure_retries_with_ai_without_excerpts(client, db_session, monkeypatch):
+    await _seed_pool(db_session)
+    monkeypatch.setattr(
+        quiz_service.rag_service, "get_snippets_by_lesson", AsyncMock(return_value={"Fractions": ["an excerpt"]}),
+    )
+    calls = []
+
+    async def _side_effect(*, question_count, reference_snippets=None, reference_by_lesson=None, **_kwargs):
+        grounded = bool(reference_snippets or reference_by_lesson)
+        calls.append(grounded)
+        if grounded:
+            raise HTTPException(status_code=502, detail="grounded call failed")
+        return [_fresh_question(i) for i in range(question_count)]
+
+    with patch("app.services.quiz_service.generate_questions", new=AsyncMock(side_effect=_side_effect)):
+        resp = await client.post(GENERATE_URL, json={"subject": "Mathematics", "difficulty": "easy", "question_count": 3})
+
+    assert resp.status_code == 201
+    assert calls[0] is True and calls[-1] is False  # grounded first, then plain AI
+    assert all(q["question"].startswith("Fresh AI") for q in resp.json()["questions"])
+
+
+async def test_pool_is_used_only_when_ai_fails(client, db_session):
+    pool_texts = await _seed_pool(db_session)
+
+    with patch(
+        "app.services.quiz_service.generate_questions",
+        new=AsyncMock(side_effect=HTTPException(status_code=502, detail="AI down")),
+    ):
+        resp = await client.post(GENERATE_URL, json={"subject": "Mathematics", "difficulty": "easy", "question_count": 3})
+
+    assert resp.status_code == 201
+    assert {q["question"] for q in resp.json()["questions"]} == pool_texts
+    assert resp.json()["cache_hit"] is True
+
+
+async def test_pool_tops_up_only_what_ai_left_short(client, db_session):
+    await _seed_pool(db_session, n=1)
+
+    async def _side_effect(*, question_count, **_kwargs):
+        return [_fresh_question(0), _fresh_question(1)]  # AI can only come up with 2 of the 3
+
+    with patch("app.services.quiz_service.generate_questions", new=AsyncMock(side_effect=_side_effect)):
+        resp = await client.post(GENERATE_URL, json={"subject": "Mathematics", "difficulty": "easy", "question_count": 3})
+
+    assert resp.status_code == 201
+    texts = [q["question"] for q in resp.json()["questions"]]
+    assert sum(t.startswith("Fresh AI") for t in texts) == 2 and sum(t.startswith("Pool") for t in texts) == 1
 
 
 # ── Debounced background top-up ─────────────────────────────────────────────

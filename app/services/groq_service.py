@@ -18,6 +18,7 @@ from groq import (
 from groq.types.chat import ChatCompletionMessageParam
 
 from app.core.config import settings
+from app.services import source_labels
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,9 @@ REFERENCE MATERIAL RULES (only apply when reference material is provided below):
 - If it doesn't cover something you need, fall back to your own knowledge of the standard syllabus.
 - It may mention figures, graphs or tables ("see Figure 3.2") the student will never see — never base a
   question on one; use only facts stated in its text.
+- Each excerpt starts with a label like "[Source: science grade 10 part 1.pdf, page 46]". Add a "source"
+  field to every question: copy, exactly, the label of the excerpt the question is based on, or null if it
+  isn't based on any excerpt.
 """
 
 
@@ -182,6 +186,9 @@ async def generate_questions(
     avoid_lessons = avoid_lessons or []
     random_lessons = lesson is None
     has_reference_material = bool(reference_snippets) or bool(reference_by_lesson)
+    allowed_sources = source_labels.labels_in(
+        [*(reference_snippets or []), *(s for snippets in (reference_by_lesson or {}).values() for s in snippets)]
+    )
 
     system_prompt = """You are an expert educational content creator for Sri Lankan school students.
 Your task is to generate UNIQUE, DIVERSE multiple-choice quiz questions.
@@ -402,6 +409,8 @@ QUALITY RULES:
             "correct_answer": correct,
             "explanation": explanation,
             "lesson": q_lesson,
+            # Only a label we actually gave it counts -- a made-up source is dropped, never stored.
+            "source_pages": source_labels.to_source_pages(q.get("source"), allowed_sources),
         })
 
     if telemetry is not None:
@@ -432,6 +441,9 @@ async def generate_shuffle_quiz_questions(
     existing_questions_by_subject = existing_questions_by_subject or {}
     lesson_choices_by_subject = lesson_choices_by_subject or {}
     reference_by_lesson_by_subject = reference_by_lesson_by_subject or {}
+    allowed_sources = source_labels.labels_in(
+        s for by_lesson in reference_by_lesson_by_subject.values() for snippets in by_lesson.values() for s in snippets
+    )
     total_count = sum(count for _, _, count in subject_plan)
 
     system_prompt = """You are an expert educational content creator for Sri Lankan school students.
@@ -629,6 +641,7 @@ QUALITY RULES:
             "options": options,
             "correct_answer": correct,
             "explanation": explanation,
+            "source_pages": source_labels.to_source_pages(q.get("source"), allowed_sources),
         })
 
     if telemetry is not None:

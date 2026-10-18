@@ -1,4 +1,5 @@
 import logging
+import math
 from asyncio import to_thread
 
 from sentence_transformers import CrossEncoder
@@ -21,11 +22,14 @@ class RerankService:
             return []
 
         pairs = [(query, c.text) for c in candidates]
-        scores = await to_thread(self.model.predict, pairs)
+        logits = await to_thread(self.model.predict, pairs)
 
+        # ms-marco cross-encoders output raw logits (roughly -11..11, model-specific scale); a sigmoid maps them to
+        # 0-1 relevance so RAG_SCORE_THRESHOLD means the same thing whatever the query looks like.
+        scores = [1.0 / (1.0 + math.exp(-float(logit))) for logit in logits]
         ranked = sorted(zip(candidates, scores), key=lambda pair: pair[1], reverse=True)
 
         return [
-            SearchResult(text=c.text, score=round(float(s), 4), metadata=c.metadata)
+            SearchResult(text=c.text, score=round(s, 4), metadata=c.metadata)
             for c, s in ranked[:top_k]
         ]

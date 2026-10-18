@@ -31,7 +31,7 @@ from app.models.question import Question
 from app.models.quiz_session import QuestionAttempt, QuizSession
 from app.models.subject_mastery import SubjectMastery
 from app.schemas.quiz import GenerateQuizRequest
-from app.services import groq_service
+from app.services import groq_service, quiz_service
 from app.services.quiz_service import generate_quiz, get_or_create_user
 from tests.conftest import TEST_CLERK_ID
 
@@ -381,10 +381,9 @@ async def test_shuffle_falls_back_to_db_entirely_when_the_ai_call_fails_outright
     full count becomes a DB-fallback deficit instead of failing the
     request -- as long as cached questions exist for those subjects.
     """
-    # Marked as already seen by this test user so the new pool-first read
-    # doesn't consume them before the AI phase even runs -- the point of
-    # this test is that an outright AI failure still recovers via the DB
-    # fallback tiers, not the pool. Grade 7 (no curriculum data) so the
+    # Marked as already seen by this test user so the unseen-first pool
+    # fallback skips them -- the point of this test is that an outright AI
+    # failure still recovers via the DB fallback tiers after that. Grade 7 (no curriculum data) so the
     # generic "Arithmetic"/"Biology" lesson stand-ins aren't filtered out by
     # the grade-10/11 curriculum-lesson matching the DB fallback now applies.
     user = await get_or_create_user(db_session, TEST_CLERK_ID)
@@ -493,3 +492,36 @@ def test_allocate_shuffle_subject_counts_randomizes_which_subjects_get_the_remai
         assert sum(counts.values()) == 4
         winners.add(next(s for s, c in counts.items() if c == 2))
     assert len(winners) > 1
+
+
+@pytest.mark.asyncio
+async def test_shuffle_retries_without_excerpts_when_the_grounded_call_fails(db_session, monkeypatch):
+    monkeypatch.setattr(
+        quiz_service.rag_service, "get_snippets_by_lesson_for_subjects",
+        AsyncMock(return_value={"Mathematics": {"Fractions": ["an excerpt"]}}),
+    )
+    calls = []
+
+    async def _side_effect(*, subject_plan, reference_by_lesson_by_subject=None, **_kwargs):
+        grounded = bool(reference_by_lesson_by_subject)
+        calls.append(grounded)
+        if grounded:
+            raise HTTPException(status_code=502, detail="grounded call failed")
+        return [
+            {"subject": subj, "lesson": "Fractions", "difficulty": diff, "question": f"Plain AI {subj} {word}?",
+             "options": ["A", "B", "C", "D"], "correct_answer": "A", "explanation": ""}
+            for subj, diff, count in subject_plan for word in ["alpha", "bravo"][:count]
+        ]
+
+    payload = GenerateQuizRequest(shuffle=True, subjects=["Mathematics", "Science"], question_count=4)
+    with (
+        patch("app.services.quiz_service.generate_shuffle_quiz_questions", new=AsyncMock(side_effect=_side_effect)),
+        patch("app.services.quiz_service._is_near_duplicate", return_value=False),
+    ):
+        _session, questions, cache_hit, _difficulty, _lesson = await generate_quiz(
+            db=db_session, clerk_id=TEST_CLERK_ID, payload=payload,
+        )
+
+    assert calls == [True, False]  # grounded first, then plain AI
+    assert all(q.question.startswith("Plain AI") for q in questions) and len(questions) == 4
+    assert cache_hit is False
