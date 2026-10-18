@@ -1,7 +1,10 @@
 import asyncio
 import logging
+import time
 
 from app.core.config import settings
+from app.schemas.retrieval import SearchResult
+from app.services import curriculum_service, source_labels
 from app.services.embedding_service import EmbeddingGenerator
 from app.services.rerank_service import RerankService
 from app.services.retrieval_service import RetrievalService
@@ -12,6 +15,8 @@ logger = logging.getLogger(__name__)
 _embedder: EmbeddingGenerator | None = None
 _reranker: RerankService | None = None
 _retrieval_service: RetrievalService | None = None
+# (grade, subject, lesson, max_snippets) -> (expires_at monotonic, results). Per process, like the singletons.
+_excerpt_cache: dict[tuple[int, str, str, int], tuple[float, list[SearchResult]]] = {}
 
 
 def _is_available() -> bool:
@@ -47,7 +52,14 @@ def warm_up() -> None:
 
 
 def _build_query(grade: int, subject: str, lesson: str) -> str:
-    return f"Grade {grade} {subject}: {lesson}"
+    # Just the lesson: grade and subject are already Qdrant filters, and prefixing them ("Grade 10 Science:
+    # Motion in a straight line") made the ms-marco reranker score real chapter text so low that whole
+    # lessons came back with no excerpts at all.
+    return lesson
+
+
+def clear_cache() -> None:
+    _excerpt_cache.clear()
 
 
 def _truncate_snippet(text: str) -> str:
@@ -56,16 +68,23 @@ def _truncate_snippet(text: str) -> str:
     return text[: settings.RAG_MAX_SNIPPET_CHARS].rsplit(" ", 1)[0] + "..."
 
 
-async def get_snippets_for_lesson(
+async def retrieve_excerpts(
     *,
     grade: int,
     subject: str,
     lesson: str,
     max_snippets: int,
-) -> list[str]:
-    # Best-effort retrieval of grounding excerpts for one (grade, subject, lesson); returns [] on any failure, timeout, disabled RAG, or no result above threshold -- never raises.
+) -> list[SearchResult]:
+    # Grounding excerpts for one (grade, subject, lesson) with their page/book metadata; [] on any failure,
+    # timeout, disabled RAG, or no result above threshold -- never raises. Successful lookups are cached for
+    # RAG_CACHE_TTL_SECONDS (textbooks don't change); failures aren't, so they're retried next time.
     if not _is_available():
         return []
+
+    key = (grade, subject, lesson, max_snippets)
+    cached = _excerpt_cache.get(key)
+    if cached is not None and cached[0] > time.monotonic():
+        return cached[1]
 
     try:
         retrieval_service = await _ensure_retrieval_service()
@@ -75,6 +94,10 @@ async def get_snippets_for_lesson(
                 grade=grade,
                 subject=subject,
                 top_k=max_snippets,
+                # Chunk `lesson` tags use the curriculum's exact lesson names; a free-text lesson that isn't in
+                # the curriculum simply searches the whole subject.
+                lesson=curriculum_service.canonical_lesson(grade, subject, lesson),
+                keywords=curriculum_service.subtopics_for(grade, subject, lesson) or None,
             ),
             timeout=settings.RAG_TIMEOUT_SECONDS,
         )
@@ -85,7 +108,27 @@ async def get_snippets_for_lesson(
         )
         return []
 
-    return [_truncate_snippet(r.text) for r in results[:max_snippets]]
+    results = results[:max_snippets]
+    _excerpt_cache[key] = (time.monotonic() + settings.RAG_CACHE_TTL_SECONDS, results)
+    return results
+
+
+async def get_snippets_for_lesson(
+    *,
+    grade: int,
+    subject: str,
+    lesson: str,
+    max_snippets: int,
+) -> list[str]:
+    # Excerpt texts for the prompt, truncated and prefixed with their "[Source: <book>, page <n>]" label so the
+    # AI can say which excerpt each question came from -- see retrieve_excerpts() and source_labels.
+    results = await retrieve_excerpts(grade=grade, subject=subject, lesson=lesson, max_snippets=max_snippets)
+    snippets = []
+    for r in results:
+        label = source_labels.format_label(r.metadata or {})
+        text = _truncate_snippet(r.text)
+        snippets.append(f"{label} {text}" if label else text)
+    return snippets
 
 
 async def get_snippets_by_lesson(

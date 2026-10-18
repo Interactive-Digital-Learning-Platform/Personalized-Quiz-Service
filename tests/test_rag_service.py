@@ -27,14 +27,18 @@ def _reset_singletons():
     rag_service._embedder = None
     rag_service._reranker = None
     rag_service._retrieval_service = None
+    rag_service.clear_cache()
     yield
     rag_service._embedder = None
     rag_service._reranker = None
     rag_service._retrieval_service = None
+    rag_service.clear_cache()
 
 
-def test_build_query_format():
-    assert rag_service._build_query(10, "Mathematics", "Fractions") == "Grade 10 Mathematics: Fractions"
+def test_build_query_is_the_plain_lesson():
+    # Grade/subject are Qdrant filters; prefixing them into the query text made the reranker score real
+    # chapter text too low to pass the threshold.
+    assert rag_service._build_query(10, "Mathematics", "Fractions") == "Fractions"
 
 
 @pytest.mark.asyncio
@@ -189,3 +193,30 @@ async def test_get_snippets_by_lesson_for_subjects_respects_combined_cap(monkeyp
     # Combined cap of 4 across both subjects, not 4 per subject.
     assert len(seen_pairs) == 4
     assert sum(len(v) for v in result.values()) == 4
+
+
+@pytest.mark.asyncio
+async def test_retrieve_excerpts_caches_successful_lookups(monkeypatch):
+    monkeypatch.setattr(settings, "RAG_ENABLED", True)
+    monkeypatch.setattr(settings, "QDRANT_URL", "http://localhost:6333")
+    fake_service = AsyncMock()
+    fake_service.search = AsyncMock(return_value=[SearchResult(text="chapter text", score=0.9, metadata={"page_start": 5})])
+    monkeypatch.setattr(rag_service, "_ensure_retrieval_service", AsyncMock(return_value=fake_service))
+
+    first = await rag_service.retrieve_excerpts(grade=10, subject="Science", lesson="Friction", max_snippets=2)
+    second = await rag_service.retrieve_excerpts(grade=10, subject="Science", lesson="Friction", max_snippets=2)
+
+    assert first == second and first[0].metadata == {"page_start": 5}
+    assert fake_service.search.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_retrieve_excerpts_does_not_cache_failures(monkeypatch):
+    monkeypatch.setattr(settings, "RAG_ENABLED", True)
+    monkeypatch.setattr(settings, "QDRANT_URL", "http://localhost:6333")
+    fake_service = AsyncMock()
+    fake_service.search = AsyncMock(side_effect=[RuntimeError("qdrant down"), [SearchResult("ok", 0.9, {})]])
+    monkeypatch.setattr(rag_service, "_ensure_retrieval_service", AsyncMock(return_value=fake_service))
+
+    assert await rag_service.retrieve_excerpts(grade=10, subject="Science", lesson="Heat", max_snippets=2) == []
+    assert len(await rag_service.retrieve_excerpts(grade=10, subject="Science", lesson="Heat", max_snippets=2)) == 1

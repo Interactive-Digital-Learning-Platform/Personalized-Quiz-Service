@@ -292,9 +292,22 @@ class Settings(BaseSettings):
     EMBEDDING_DIM: int = 768
     RAG_MAX_QUERY_TOKENS: int = 8192
     RAG_TOP_K_CHUNKS: int = 5
-    RAG_SCORE_THRESHOLD: float = 0.6
+    # Reranker relevance is sigmoid-normalised to 0-1 (see rerank_service). An excerpt must clear this
+    # absolute bar AND score at least RAG_RELATIVE_SCORE_FLOOR x the best excerpt for the same lesson; inside
+    # a lesson's own tagged chapter only the relative floor applies (see retrieval_service.search). Checked
+    # with scripts/eval_retrieval.py against tests/data/retrieval_eval_set.json.
+    RAG_SCORE_THRESHOLD: float = 0.3
+    RAG_RELATIVE_SCORE_FLOOR: float = 0.4
     RERANK_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-    RERANK_OVERFETCH: int = 4
+    # Dense-search candidates handed to the reranker per lesson query (was top_k x 4 = 8, which often
+    # missed a lesson's chapter entirely). Costs ~40 short cross-encoder pairs per query on CPU.
+    RAG_RERANK_CANDIDATES: int = 40
+    # Textbooks don't change, so a lesson's excerpts are cached per (grade, subject, lesson, count).
+    RAG_CACHE_TTL_SECONDS: int = 6 * 60 * 60
+    # Writes ai_generation_events.rag_snippet_count and questions.source_pages (which textbook page each AI
+    # question was based on). Off until migration f7c1e2d3a4b5 has been applied to the database -- the columns
+    # are deferred in the models, so nothing reads or writes them while this is off.
+    RAG_PROVENANCE_COLUMNS_ENABLED: bool = False
     # Every rag_service call is bounded by this timeout and falls back to
     # empty results rather than ever raising into quiz_service/groq_service.
     RAG_TIMEOUT_SECONDS: float = 8.0

@@ -47,3 +47,19 @@ def canonical_lesson(grade: int, subject: str, lesson: str) -> str | None:
         if candidate.strip().lower() == target:
             return candidate
     return None
+
+
+@cache
+def _load_subtopics(grade: int) -> dict[str, dict[str, list[str]]]:
+    # subject -> lesson -> section headings, taken from each textbook's contents page (only books whose
+    # contents list "1.1 Section 02"-style entries have them). Used to widen RAG retrieval for a lesson.
+    path = _CURRICULUM_DIR / f"subtopics_grade_{grade}.json"
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def subtopics_for(grade: int, subject: str, lesson: str) -> list[str]:
+    canonical_subj = canonical_subject(grade, subject)
+    canonical_les = canonical_lesson(grade, subject, lesson)
+    if canonical_subj is None or canonical_les is None:
+        return []
+    return list(_load_subtopics(grade).get(canonical_subj, {}).get(canonical_les, []))

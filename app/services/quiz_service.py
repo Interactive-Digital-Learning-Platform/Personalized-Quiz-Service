@@ -26,6 +26,7 @@ from app.services import (
     bkt_service,
     curriculum_service,
     difficulty_service,
+    provenance_columns,
     rag_service,
     telemetry_service,
 )
@@ -118,6 +119,10 @@ async def _get_recent_lessons(
         if len(seen) >= limit:
             break
     return seen
+
+
+def _snippet_count(snippets: list[str] | None, by_lesson: dict[str, list[str]] | None) -> int:
+    return len(snippets or []) + sum(len(v) for v in (by_lesson or {}).values())
 
 
 async def _get_existing_subject_questions(db: AsyncSession, subject: str, limit: int = 40) -> list[str]:
@@ -430,7 +435,7 @@ async def _generate_or_cache_tier(
     reference_snippets: list[str] | None = None,
     reference_by_lesson: dict[str, list[str]] | None = None,
 ) -> tuple[list[Question], bool, bool, bool, int, int, str | None]:
-    # Generates (or falls back to cached) `question_count` questions at one subject+difficulty tier — pool-first/AI-for-the-shortfall/blind-cache-as-last-resort, factored out so a challenge-zone quiz can call it once per tier; `seen_texts` is shared across tiers for cross-tier dedup, `reference_snippets`/`reference_by_lesson` are RAG excerpts computed once per subject by the caller, and an explicit lesson pin skips the pool entirely. Returns (questions, cache_hit, ai_failed, ai_succeeded, generation_calls_made, duplicate_count, error_category).
+    # Generates (or falls back to cached) `question_count` questions at one subject+difficulty tier — AI grounded in the textbook excerpts first, then AI without excerpts if that fails, then the question pool (unseen-by-this-user first, any cached question as the last resort) for whatever's still short. Factored out so a challenge-zone quiz can call it once per tier; `seen_texts` is shared across tiers for cross-tier dedup, `reference_snippets`/`reference_by_lesson` are RAG excerpts computed once per subject by the caller, and an explicit lesson pin skips the pool entirely. Returns (questions, cache_hit, ai_failed, ai_succeeded, generation_calls_made, duplicate_count, error_category).
     exclude_ids: list[int] = payload.excluded_question_ids or []
     picked_ids: set[int] = set(exclude_ids)
 
@@ -455,23 +460,6 @@ async def _generate_or_cache_tier(
     elif lesson_choices:
         base_filter.append(Question.lesson.in_(lesson_choices))
 
-    # ── Pool-first: read whatever this user hasn't already been asked out of the pre-generated pool before ever calling Groq. Runs regardless of `force_cache`.
-    if lesson is None:
-        pool_questions = await _fetch_pool_questions(
-            db,
-            user_id=user_id,
-            subject=subject,
-            difficulty=difficulty,
-            grade=payload.grade,
-            limit=question_count,
-            exclude_ids=picked_ids,
-            exclude_texts=seen_texts,
-        )
-        if pool_questions:
-            questions.extend(pool_questions)
-            picked_ids.update(q.id for q in pool_questions)
-            cache_hit = True
-
     remaining = question_count - len(questions)
 
     if remaining > 0 and not force_cache:
@@ -482,79 +470,95 @@ async def _generate_or_cache_tier(
             existing_texts_stmt = select(Question.question).where(*existing_texts_filter)
             existing_texts: list[str] = list((await db.execute(existing_texts_stmt)).scalars().all())
 
-            # Ask Groq for questions, drop near-duplicates, and if short, ask again for the remainder — up to 3 rounds, keeping whatever unique set results even if a narrow topic can't fill the full count.
-            needed = remaining
-            deduped_ai: list[dict] = []
-            local_seen = seen_texts + existing_texts
-            max_attempts = 3
+            async def _ask_ai(snippets: list[str] | None, by_lesson: dict[str, list[str]] | None) -> list[dict]:
+                nonlocal generation_calls_made, duplicate_count
+                # Ask Groq for questions, drop near-duplicates, and if short, ask again for the remainder — up to 3 rounds, keeping whatever unique set results even if a narrow topic can't fill the full count.
+                needed = remaining
+                deduped_ai: list[dict] = []
+                local_seen = seen_texts + existing_texts
+                max_attempts = 3
 
-            for attempt in range(max_attempts):
-                still_needed = needed - len(deduped_ai)
-                if still_needed <= 0:
-                    break
-                if not call_budget.consume():
-                    logger.info(
-                        "Generation call budget exhausted — stopping dedup retries [difficulty=%s]", difficulty,
+                for attempt in range(max_attempts):
+                    still_needed = needed - len(deduped_ai)
+                    if still_needed <= 0:
+                        break
+                    if not call_budget.consume():
+                        logger.info(
+                            "Generation call budget exhausted — stopping dedup retries [difficulty=%s]", difficulty,
+                        )
+                        break
+
+                    batch = await generate_questions(
+                        grade=payload.grade,
+                        subject=subject,
+                        lesson=lesson,
+                        lesson_choices=lesson_choices,
+                        difficulty=difficulty,
+                        question_count=still_needed,
+                        existing_questions=local_seen,
+                        avoid_lessons=recent_lessons,
+                        preferred_lessons=preferred_lessons,
+                        adaptive_context=adaptive_context,
+                        telemetry=telemetry_counts,
+                        reference_snippets=snippets,
+                        reference_by_lesson=by_lesson,
                     )
-                    break
+                    generation_calls_made += 1
 
-                batch = await generate_questions(
-                    grade=payload.grade,
-                    subject=subject,
-                    lesson=lesson,
-                    lesson_choices=lesson_choices,
-                    difficulty=difficulty,
-                    question_count=still_needed,
-                    existing_questions=local_seen,
-                    avoid_lessons=recent_lessons,
-                    preferred_lessons=preferred_lessons,
-                    adaptive_context=adaptive_context,
-                    telemetry=telemetry_counts,
-                    reference_snippets=reference_snippets,
-                    reference_by_lesson=reference_by_lesson,
-                )
-                generation_calls_made += 1
+                    added = 0
+                    for q in batch:
+                        q_text = q["question"]
+                        if not _is_near_duplicate(q_text, local_seen):
+                            deduped_ai.append(q)
+                            local_seen.append(q_text)
+                            added += 1
+                        else:
+                            duplicate_count += 1
+                            logger.info("Dedup: discarded near-duplicate question (attempt %d)", attempt + 1)
 
-                added = 0
-                for q in batch:
-                    q_text = q["question"]
-                    if not _is_near_duplicate(q_text, local_seen):
-                        deduped_ai.append(q)
-                        local_seen.append(q_text)
-                        added += 1
-                    else:
-                        duplicate_count += 1
-                        logger.info("Dedup: discarded near-duplicate question (attempt %d)", attempt + 1)
+                    logger.info(
+                        "Dedup attempt %d/%d [difficulty=%s]: +%d accepted, %d total, %d still needed",
+                        attempt + 1, max_attempts, difficulty, added, len(deduped_ai), needed - len(deduped_ai),
+                    )
 
-                logger.info(
-                    "Dedup attempt %d/%d [difficulty=%s]: +%d accepted, %d total, %d still needed",
-                    attempt + 1, max_attempts, difficulty, added, len(deduped_ai), needed - len(deduped_ai),
-                )
-
-            if deduped_ai:
-                ai_data = deduped_ai
-            elif call_budget.consume():
-                ai_data = await generate_questions(
-                    grade=payload.grade,
-                    subject=subject,
-                    lesson=lesson,
-                    lesson_choices=lesson_choices,
-                    difficulty=difficulty,
-                    question_count=needed,
-                    avoid_lessons=recent_lessons,
-                    preferred_lessons=preferred_lessons,
-                    adaptive_context=adaptive_context,
-                    telemetry=telemetry_counts,
-                    reference_snippets=reference_snippets,
-                    reference_by_lesson=reference_by_lesson,
-                )
-                generation_calls_made += 1
-            else:
-                # Budget exhausted before this tier got anything from AI at all — treat it the same as an AI failure so this tier falls back to cache.
+                if deduped_ai:
+                    return deduped_ai
+                if call_budget.consume():
+                    fallback_batch = await generate_questions(
+                        grade=payload.grade,
+                        subject=subject,
+                        lesson=lesson,
+                        lesson_choices=lesson_choices,
+                        difficulty=difficulty,
+                        question_count=needed,
+                        avoid_lessons=recent_lessons,
+                        preferred_lessons=preferred_lessons,
+                        adaptive_context=adaptive_context,
+                        telemetry=telemetry_counts,
+                        reference_snippets=snippets,
+                        reference_by_lesson=by_lesson,
+                    )
+                    generation_calls_made += 1
+                    return fallback_batch
+                # Budget exhausted before this tier got anything from AI at all — treat it the same as an AI failure so this tier falls back to the pool.
                 raise HTTPException(
                     status_code=status.HTTP_502_BAD_GATEWAY,
                     detail="Generation call budget exhausted for this request.",
                 )
+
+            grounded = bool(reference_snippets) or bool(reference_by_lesson)
+            try:
+                ai_data = await _ask_ai(reference_snippets, reference_by_lesson)
+            except HTTPException as grounded_exc:
+                if not grounded:
+                    raise
+                # Grounded generation failed -- try plain AI before falling back to the pool.
+                logger.warning(
+                    "AI generation with textbook excerpts failed for subject=%s, lesson=%s, difficulty=%s — "
+                    "retrying without excerpts: %s",
+                    subject, lesson or "<random per question>", difficulty, grounded_exc.detail,
+                )
+                ai_data = await _ask_ai(None, None)
 
             for q_data in ai_data:
                 question = Question(
@@ -566,6 +570,7 @@ async def _generate_or_cache_tier(
                     difficulty=difficulty,
                     grade=payload.grade,
                 )
+                question.pending_source_pages = q_data.get("source_pages")  # plain attribute, see provenance_columns
                 db.add(question)
                 questions.append(question)
                 seen_texts.append(q_data["question"])
@@ -575,13 +580,31 @@ async def _generate_or_cache_tier(
 
         except HTTPException as exc:
             logger.warning(
-                "AI generation failed for subject=%s, lesson=%s, difficulty=%s — falling back to DB cache: %s",
+                "AI generation failed for subject=%s, lesson=%s, difficulty=%s — falling back to the question pool: %s",
                 subject, lesson or "<random per question>", difficulty, exc.detail,
             )
             ai_failed = True
             error_category = telemetry_service.categorize_generation_error(exc)
 
-    # ── Blind final fallback: whatever's still short after pool + AI, ignoring per-user attempt history (a repeat beats returning fewer questions than requested).
+    # ── Pool fallback #1: whatever AI couldn't cover, from questions this user hasn't been asked yet (an explicit lesson pin skips this -- the pool reader isn't lesson-scoped -- and goes straight to the lesson-filtered fallback below).
+    remaining = question_count - len(questions)
+    if remaining > 0 and lesson is None:
+        pool_questions = await _fetch_pool_questions(
+            db,
+            user_id=user_id,
+            subject=subject,
+            difficulty=difficulty,
+            grade=payload.grade,
+            limit=remaining,
+            exclude_ids=picked_ids,
+            exclude_texts=seen_texts,
+        )
+        if pool_questions:
+            questions.extend(pool_questions)
+            picked_ids.update(q.id for q in pool_questions)
+            cache_hit = True
+
+    # ── Pool fallback #2 (blind): whatever's still short, ignoring per-user attempt history (a repeat beats returning fewer questions than requested).
     remaining = question_count - len(questions)
     if remaining > 0:
         # Set True as soon as a fallback is needed at all (not gated on it actually finding rows) — matches the pre-pool "AI alone couldn't cover this" telemetry contract.
@@ -625,7 +648,7 @@ async def _generate_shuffle_quiz_questions(
     user: User,
     telemetry_counts: dict,
 ) -> tuple[list[Question], bool, bool, int, int, str | None]:
-    # Shuffle Mode's generation pipeline: read each subject's pool first (no Groq call), then ONE Groq call covering only whatever's still short, each subject at its own adaptive difficulty, then a blind DB-cache top-up; only raises if the quiz still can't reach payload.question_count. Returns (questions, cache_hit, ai_succeeded, generation_calls_made, duplicate_count, error_category) -- the same shape generate_quiz()'s non-shuffle loop produces.
+    # Shuffle Mode's generation pipeline: ONE Groq call for every subject (each at its own adaptive difficulty) grounded in the textbook excerpts, retried once without excerpts if that fails, then the question pool for whatever's still short (unseen-by-this-user first, then a blind DB-cache top-up); only raises if the quiz still can't reach payload.question_count. Returns (questions, cache_hit, ai_succeeded, generation_calls_made, duplicate_count, error_category) -- the same shape generate_quiz()'s non-shuffle loop produces.
     subjects = payload.subjects or []
     subject_counts = _allocate_shuffle_subject_counts(subjects, payload.question_count)
     selected_subjects = list(subject_counts)
@@ -653,36 +676,9 @@ async def _generate_shuffle_quiz_questions(
     error_category: str | None = None
     deficit: dict[str, int] = {subject: count for subject, _, count in subject_plan}
 
-    # ── Pool phase: read each subject's (subject, difficulty) pool first, excluding whatever this user has already been asked. Runs regardless of payload.force_cache.
-    for subject, difficulty, _count in subject_plan:
-        remaining = deficit.get(subject, 0)
-        if remaining <= 0:
-            continue
-        pool_questions = await _fetch_pool_questions(
-            db,
-            user_id=user.id,
-            subject=subject,
-            difficulty=difficulty,
-            grade=payload.grade,
-            limit=remaining,
-            exclude_ids=used_ids,
-            exclude_texts=used_texts,
-        )
-        if not pool_questions:
-            continue
-        generated.extend(pool_questions)
-        used_ids.update(q.id for q in pool_questions)
-        deficit[subject] -= len(pool_questions)
-        cache_hit = True
-
-    pool_question_count = len(generated)
     total_deficit = sum(max(0, d) for d in deficit.values())
-    logger.info(
-        "Shuffle pool phase completed requested=%d pool_served=%d deficit=%d",
-        payload.question_count, pool_question_count, total_deficit,
-    )
 
-    # ── AI phase: one batched Groq call covering only the subjects/counts still short after the pool phase. payload.force_cache skips this phase entirely.
+    # ── AI phase: one batched Groq call covering every subject. payload.force_cache skips this phase entirely.
     if not payload.force_cache and total_deficit > 0:
         ai_subject_plan = [
             (subject, difficulty, deficit[subject])
@@ -708,17 +704,31 @@ async def _generate_shuffle_quiz_questions(
             max_snippets_per_lesson=settings.RAG_SNIPPETS_PER_LESSON,
             max_total_lesson_queries=settings.RAG_MAX_LESSON_QUERIES_SHUFFLE,
         )
-        try:
-            batch = await generate_shuffle_quiz_questions(
+        telemetry_counts["rag_snippet_count"] = sum(
+            _snippet_count(None, by_lesson) for by_lesson in reference_by_lesson_by_subject.values()
+        )
+        async def _ask_ai(references: dict[str, dict[str, list[str]]]) -> list[dict]:
+            nonlocal generation_calls_made
+            generation_calls_made += 1
+            return await generate_shuffle_quiz_questions(
                 grade=payload.grade,
                 subject_plan=ai_subject_plan,
                 avoid_lessons_by_subject=avoid_lessons_by_subject,
                 existing_questions_by_subject=existing_questions_by_subject,
                 lesson_choices_by_subject=lesson_choices_by_subject,
                 telemetry=telemetry_counts,
-                reference_by_lesson_by_subject=reference_by_lesson_by_subject,
+                reference_by_lesson_by_subject=references,
             )
-            generation_calls_made += 1
+
+        try:
+            try:
+                batch = await _ask_ai(reference_by_lesson_by_subject)
+            except HTTPException as grounded_exc:
+                if not any(reference_by_lesson_by_subject.values()):
+                    raise
+                # Grounded generation failed -- try plain AI before falling back to the pool.
+                logger.warning("Shuffle AI generation with textbook excerpts failed, retrying without: %s", grounded_exc.detail)
+                batch = await _ask_ai({})
 
             for q_data in batch:
                 q_text = q_data["question"]
@@ -738,28 +748,51 @@ async def _generate_shuffle_quiz_questions(
                     difficulty=q_data["difficulty"],
                     grade=payload.grade,
                 )
+                question.pending_source_pages = q_data.get("source_pages")  # plain attribute, see provenance_columns
                 db.add(question)
                 generated.append(question)
                 used_texts.append(q_text)
                 deficit[subject] -= 1
 
         except HTTPException as exc:
-            generation_calls_made += 1
             error_category = telemetry_service.categorize_generation_error(exc)
             ai_failed = True
             logger.warning("Shuffle AI generation failed: %s", exc.detail)
             # Deliberately not re-raised -- falls through to the DB fallback below instead of failing the whole request.
 
-    ai_question_count = len(generated) - pool_question_count
+    ai_question_count = len(generated)
     total_deficit = sum(max(0, d) for d in deficit.values())
     logger.info(
-        "Shuffle AI phase completed requested=%d pool_served=%d ai_generated=%d deficit=%d",
-        payload.question_count, pool_question_count, ai_question_count, total_deficit,
+        "Shuffle AI phase completed requested=%d ai_generated=%d deficit=%d",
+        payload.question_count, ai_question_count, total_deficit,
     )
 
-    # AI-created questions need a flush before their `.id` can be used to exclude them from the DB-fallback queries below.
+    # AI-created questions need a flush before their `.id` can be used to exclude them from the pool/DB-fallback queries below.
     await db.flush()
     used_ids.update(q.id for q in generated)
+
+    # ── Pool fallback: per subject, questions this user hasn't been asked yet, only for subjects AI left short.
+    for subject, difficulty, _count in subject_plan:
+        remaining = deficit.get(subject, 0)
+        if remaining <= 0:
+            continue
+        pool_questions = await _fetch_pool_questions(
+            db,
+            user_id=user.id,
+            subject=subject,
+            difficulty=difficulty,
+            grade=payload.grade,
+            limit=remaining,
+            exclude_ids=used_ids,
+            exclude_texts=used_texts,
+        )
+        if not pool_questions:
+            continue
+        generated.extend(pool_questions)
+        used_ids.update(q.id for q in pool_questions)
+        deficit[subject] -= len(pool_questions)
+        cache_hit = True
+    pool_question_count = len(generated) - ai_question_count
 
     # ── DB fallback #1: per-subject, only for subjects still short ───────
     for subject, _difficulty, _requested_count in subject_plan:
@@ -923,7 +956,11 @@ async def generate_quiz(
     error_category: str | None = None
     generation_calls_made = 0
     duplicate_count = 0
-    telemetry_counts: dict = {"invalid_question_count": 0}
+    # Shuffle overwrites rag_snippet_count with its own multi-subject total (_generate_shuffle_quiz_questions).
+    telemetry_counts: dict = {
+        "invalid_question_count": 0,
+        "rag_snippet_count": _snippet_count(reference_snippets, reference_by_lesson),
+    }
 
     try:
         if payload.shuffle:
@@ -1026,6 +1063,12 @@ async def generate_quiz(
         await db.refresh(session)
         created_session_id = session.id
 
+        # Which textbook page each new AI question was based on -- a no-op unless RAG_PROVENANCE_COLUMNS_ENABLED.
+        pending_sources = {q.id: q.pending_source_pages for q in questions if getattr(q, "pending_source_pages", None)}
+        if pending_sources and provenance_columns.enabled():
+            await provenance_columns.save_source_pages(db, pending_sources)
+            await db.commit()
+
         # No per-question refresh here on purpose — every Question already has its id (from flush()'s RETURNING clause or the cache SELECT), so refreshing individually would just add an extra DB round-trip per question.
 
         logger.info(
@@ -1058,6 +1101,7 @@ async def generate_quiz(
                 invalid_question_count=telemetry_counts["invalid_question_count"],
                 latency_ms=latency_ms,
                 error_category=error_category,
+                rag_snippet_count=telemetry_counts.get("rag_snippet_count"),
             )
         except Exception as telemetry_exc:  # noqa: BLE001 — see comment above
             logger.error("AI generation telemetry raised unexpectedly (non-critical): %s", telemetry_exc)
