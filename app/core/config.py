@@ -279,6 +279,8 @@ class Settings(BaseSettings):
     # timeout, never blocking or failing quiz generation itself.
     RAG_ENABLED: bool = True
     QDRANT_URL: str = ""
+    # Qdrant Cloud's API key; leave empty for a Qdrant that needs none (a local one).
+    QDRANT_API_KEY: str = ""
     # PDF-Ingestion-Backend-Service's knowledge base of the ingested Grade
     # 10/11 textbooks (the same collection AI-Learning-Assistant-Service
     # reads), rather than a separate quiz-only collection. Its chunks carry

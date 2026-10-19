@@ -1,56 +1,73 @@
-# ── Build Stage ───────────────────────────────────────────────────────────────
-# Use official slim Python 3.12 image to keep the image lightweight
-FROM python:3.12-slim
+# syntax=docker/dockerfile:1
 
-# Pull the uv binary from Astral's distroless image rather than installing it
-# via pip — keeps it out of the final dependency graph entirely.
+# ── Stage 1: dependencies + RAG models ────────────────────────────────────────
+FROM python:3.12-slim AS builder
+
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Set environment variables to prevent Python from writing .pyc files
-# and to ensure stdout/stderr is unbuffered (important for Docker logging)
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    HF_HOME=/app/.cache/huggingface \
+    FASTEMBED_CACHE_PATH=/app/.cache/fastembed
 
-# Create a non-root user for security
-RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
-
-# Set the working directory inside the container
 WORKDIR /app
 
-# ── Install Dependencies ───────────────────────────────────────────────────────
-# Copy only the lockfile + project metadata first to leverage Docker layer
-# caching — this layer only rebuilds when dependencies actually change.
-# --no-dev skips pytest/pytest-asyncio, which the runtime image doesn't need.
-COPY pyproject.toml uv.lock .
+# Dependencies first, on their own layer: they only reinstall when pyproject.toml / uv.lock change.
+# torch comes from the CPU-only index pinned in pyproject.toml (no multi-GB CUDA wheels).
+COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
-# ── Copy Application Code ──────────────────────────────────────────────────────
-COPY . .
+# Bake the embedding / rerank / BM25 models into the image (see scripts/download_models.py). Only the few modules
+# that load them are copied here -- not the whole app -- so an ordinary code change doesn't re-download ~600 MB of
+# models; only a change to these files (e.g. a different model name in config.py) does. The runtime stage copies
+# the full app on its own.
+COPY app/__init__.py ./app/__init__.py
+COPY app/core/__init__.py app/core/config.py ./app/core/
+COPY app/schemas/__init__.py app/schemas/retrieval.py ./app/schemas/
+COPY app/services/__init__.py app/services/embedding_service.py app/services/rerank_service.py \
+     app/services/sparse_embedding_service.py ./app/services/
+COPY scripts/download_models.py ./scripts/download_models.py
+RUN /app/.venv/bin/python scripts/download_models.py
 
-# Change ownership of all files to the non-root user
-RUN chown -R appuser:appgroup /app
 
-# Switch to non-root user
+# ── Stage 2: runtime ──────────────────────────────────────────────────────────
+FROM python:3.12-slim AS runtime
+
+# HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE: the models are already in the image -- never reach out to Hugging Face.
+# ENVIRONMENT: production unless overridden (development turns on /docs, CORS *, debug logging and auth bypass).
+# RUN_MIGRATIONS: run `alembic upgrade head` on start; set "false" when running several copies and run it once yourself.
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/app/.venv/bin:$PATH" \
+    HF_HOME=/app/.cache/huggingface \
+    FASTEMBED_CACHE_PATH=/app/.cache/fastembed \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    ENVIRONMENT=production \
+    RUN_MIGRATIONS=true \
+    WEB_CONCURRENCY=1
+
+# Non-root user with a real, writable home (the base image's system users get /nonexistent).
+RUN addgroup --system appgroup \
+    && adduser --system --ingroup appgroup --home /app --no-create-home appuser
+
+WORKDIR /app
+
+COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder --chown=appuser:appgroup /app/.cache /app/.cache
+COPY --chown=appuser:appgroup alembic.ini ./
+COPY --chown=appuser:appgroup alembic ./alembic
+COPY --chown=appuser:appgroup app ./app
+
 USER appuser
 
-# Put the venv uv created ahead of the system Python on PATH
-ENV PATH="/app/.venv/bin:$PATH"
-
-# ── Runtime ────────────────────────────────────────────────────────────────────
-# Expose the port that uvicorn will listen on
 EXPOSE 8000
 
-# Apply pending migrations first (the app only runs create_all in development),
-# then start FastAPI with uvicorn
-# --host 0.0.0.0 makes the server accessible from outside the container.
-# Worker count comes from WEB_CONCURRENCY (defaults to 1, i.e. today's
-# behavior, if unset) rather than a fixed number baked into the image, so
-# it can be tuned per-deployment without a rebuild.
-#
-# Each worker opens its own DB connection pool (see DB_POOL_SIZE/
-# DB_MAX_OVERFLOW in app/core/config.py) -- multiply by WEB_CONCURRENCY to
-# get the real total connection count against the DB, and keep that under
-# whatever ceiling your DB provider enforces.
-CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${WEB_CONCURRENCY:-1}"]
+# Models load at startup (~20 s), hence the start period.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)" || exit 1
+
+CMD ["sh", "-c", "if [ \"$RUN_MIGRATIONS\" = \"true\" ]; then alembic upgrade head; fi && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${WEB_CONCURRENCY:-1}"]
