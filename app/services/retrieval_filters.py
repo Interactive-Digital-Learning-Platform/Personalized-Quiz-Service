@@ -6,7 +6,9 @@ for chunks without the tag (anything ingested after that migration ran): a book'
 credits/preface pages mention every lesson title, so without a filter they outrank the chapters
 themselves.
 """
+import math
 import re
+from collections import Counter
 from collections.abc import Iterable
 
 from app.schemas.retrieval import SearchResult
@@ -87,3 +89,71 @@ def diversify(ranked: list[SearchResult], top_k: int) -> list[SearchResult]:
         else:
             picked.append(result)
     return (picked + deferred)[:top_k]
+
+
+# Words too generic to say which lesson a heading belongs to.
+_HEADING_STOP_WORDS = frozenset(
+    [
+        "the", "and", "for", "with", "from", "into", "its", "their", "this", "that", "are", "was", "were",
+        "how", "what", "why", "when", "which", "who", "about", "between", "of", "in", "on", "to", "by",
+        "an", "a", "or", "as", "at", "is", "be",
+    ]
+)
+
+
+def _heading_words(text: str) -> set[str]:
+    words = set()
+    for word in re.findall(r"[a-z]+", text.lower()):
+        if len(word) < 3 or word in _HEADING_STOP_WORDS:
+            continue
+        # "Proteins" ~ "protein", "Forces" ~ "force" -- enough to line headings up with curriculum names.
+        words.add(word[:-1] if len(word) > 4 and word.endswith("s") else word)
+    return words
+
+
+def heading_text(result: SearchResult) -> str:
+    """A chunk's place in its book -- its section heading and the headings above it (PDF-Ingestion-Backend-Service
+    stores these as `section` / `section_path`)."""
+    metadata = result.metadata or {}
+    path = metadata.get("section_path") or []
+    parts = path if isinstance(path, list) else [str(path)]
+    return " ".join([*map(str, parts), str(metadata.get("section") or "")])
+
+
+def shared_title_words(lesson_titles: Iterable[str]) -> frozenset[str]:
+    """Words in two or more of a subject's lesson titles ("Sri Lanka", "British", "Computer") -- they don't say
+    which lesson a heading belongs to."""
+    counts = Counter(word for title in lesson_titles for word in _heading_words(title))
+    return frozenset(word for word, n in counts.items() if n >= 2)
+
+
+def matches_lesson(
+    result: SearchResult,
+    phrases: Iterable[str],
+    *,
+    title: str | None = None,
+    shared_words: frozenset[str] = frozenset(),
+) -> bool:
+    """True when the chunk sits under a heading naming the lesson or one of its subtopics.
+
+    Strict, for every phrase (the lesson's subtopics, and its title): every meaningful word of the name appears
+    in the chunk's headings (or, for a long name, at least three quarters of them). Looser, for the lesson
+    `title` only -- textbook headings rarely repeat a long curriculum title ("Logic Gates with Boolean
+    Functions" vs. "4.3 Basic Logic Gates"): leaving out words several lesson titles share (`shared_words`),
+    at least half the title's remaining words, and never fewer than two, appear in the headings.
+    """
+    heading = _heading_words(heading_text(result))
+    if not heading:
+        return False
+    if title is not None:
+        distinctive = _heading_words(title) - shared_words
+        if len(distinctive) >= 2 and len(distinctive & heading) >= max(2, math.ceil(len(distinctive) / 2)):
+            return True
+    for phrase in (*phrases, *([title] if title else [])):
+        wanted = _heading_words(phrase)
+        if not wanted:
+            continue
+        hits = len(wanted & heading)
+        if hits == len(wanted) or (len(wanted) >= 4 and hits >= 0.75 * len(wanted)):
+            return True
+    return False

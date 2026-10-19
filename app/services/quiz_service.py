@@ -470,12 +470,17 @@ async def _generate_or_cache_tier(
             existing_texts_stmt = select(Question.question).where(*existing_texts_filter)
             existing_texts: list[str] = list((await db.execute(existing_texts_stmt)).scalars().all())
 
-            async def _ask_ai(snippets: list[str] | None, by_lesson: dict[str, list[str]] | None) -> list[dict]:
+            async def _ask_ai(
+                snippets: list[str] | None,
+                by_lesson: dict[str, list[str]] | None,
+                count: int | None = None,
+                also_seen: list[str] | None = None,
+            ) -> list[dict]:
                 nonlocal generation_calls_made, duplicate_count
                 # Ask Groq for questions, drop near-duplicates, and if short, ask again for the remainder — up to 3 rounds, keeping whatever unique set results even if a narrow topic can't fill the full count.
-                needed = remaining
+                needed = count if count is not None else remaining
                 deduped_ai: list[dict] = []
-                local_seen = seen_texts + existing_texts
+                local_seen = seen_texts + existing_texts + (also_seen or [])
                 max_attempts = 3
 
                 for attempt in range(max_attempts):
@@ -559,6 +564,22 @@ async def _generate_or_cache_tier(
                     subject, lesson or "<random per question>", difficulty, grounded_exc.detail,
                 )
                 ai_data = await _ask_ai(None, None)
+            else:
+                # Grounded generation worked but came back short (a narrow chapter, dropped near-duplicates):
+                # plain AI fills the rest before the pool is touched -- knowledge base + AI, then AI only, then pool.
+                shortfall = remaining - len(ai_data)
+                if grounded and shortfall > 0:
+                    try:
+                        extra = await _ask_ai(
+                            None, None, count=shortfall, also_seen=[q["question"] for q in ai_data],
+                        )
+                        ai_data = [*ai_data, *extra[:shortfall]]
+                    except HTTPException as plain_exc:
+                        logger.warning(
+                            "AI top-up without excerpts failed for subject=%s, lesson=%s, difficulty=%s — the pool "
+                            "covers the remaining %d: %s",
+                            subject, lesson or "<random per question>", difficulty, shortfall, plain_exc.detail,
+                        )
 
             for q_data in ai_data:
                 question = Question(
