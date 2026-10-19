@@ -31,7 +31,8 @@ class RetrievalService:
         reranker: RerankService,
         sparse_embedder: SparseEmbeddingGenerator | None = None,
     ):
-        self.client = AsyncQdrantClient(url=settings.QDRANT_URL)
+        # An empty key is sent as "" rather than omitted, so only pass one when it's set.
+        self.client = AsyncQdrantClient(url=settings.QDRANT_URL, api_key=settings.QDRANT_API_KEY or None)
         self.collection = settings.QUIZ_KNOWLEDGE_COLLECTION
         self.embedder = embedder
         self.top_k = settings.RAG_TOP_K_CHUNKS
