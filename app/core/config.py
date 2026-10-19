@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     # shared across every difficulty tier a challenge-zone quiz splits into
     # (each tier would otherwise run its own dedup-retry loop independently,
     # multiplying calls per tier and risking 429s on a single user action).
-    GROQ_MAX_GENERATION_CALLS_PER_REQUEST: int = 4
+    GROQ_MAX_GENERATION_CALLS_PER_REQUEST: int = 100
 
     # Per-user request caps for the endpoints that call Groq on every request (see app/core/rate_limit.py) -- a
     # sliding window of RATE_LIMIT_WINDOW_SECONDS. Over the cap -> 429 with Retry-After.
