@@ -48,6 +48,17 @@ def _no_real_pool_replenish(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_provenance_columns(monkeypatch):
+    # The provenance columns (alembic f7c1e2d3a4b5) are deliberately unmapped, so the test DB built from the
+    # models doesn't have them -- with RAG_PROVENANCE_COLUMNS_ENABLED switched on in a developer's .env, every
+    # quiz-generation test would try to write them and fail. Off unless a test switches it on itself
+    # (test_rag_provenance.py does, against its own table setup).
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "RAG_PROVENANCE_COLUMNS_ENABLED", False)
+
+
+@pytest.fixture(autouse=True)
 def _fresh_rate_limits_and_feedback_cache():
     # Both are module-level, per-process state; reset so tests don't leak into each other.
     rate_limit.reset()

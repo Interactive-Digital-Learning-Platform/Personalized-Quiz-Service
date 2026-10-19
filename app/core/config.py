@@ -279,14 +279,37 @@ class Settings(BaseSettings):
     # timeout, never blocking or failing quiz generation itself.
     RAG_ENABLED: bool = True
     QDRANT_URL: str = ""
-    # Reuses PDF-Ingestion-Backend-Service's existing pdf_knowledge_base
-    # collection (already holds the ingested Grade 10/11 textbook PDFs)
-    # rather than a separate quiz-only collection. Points there were
-    # backfilled with `grade` (int) / `subject` (str) payload fields by
-    # qdrant-migrations/003_create_quiz_knowledge_base_collection.py so
-    # retrieval_service.py's grade+subject filter has something to match —
-    # see that migration for the filename → (grade, subject) mapping.
-    QUIZ_KNOWLEDGE_COLLECTION: str = "pdf_knowledge_base"
+    # PDF-Ingestion-Backend-Service's knowledge base of the ingested Grade
+    # 10/11 textbooks (the same collection AI-Learning-Assistant-Service
+    # reads), rather than a separate quiz-only collection. Its chunks carry
+    # `grade` (int) and `subject` (str) payload fields, both indexed, which
+    # are the only fields retrieval_service.py filters on in Qdrant.
+    QUIZ_KNOWLEDGE_COLLECTION: str = "pdf_knowledge_base_v2"
+    # The collection's vector layout is detected on first search
+    # (retrieval_service.RetrievalService._resolve_layout): a single unnamed
+    # vector (v1) or this named dense vector (v2). When the collection also
+    # has this sparse vector and RAG_HYBRID_SEARCH_ENABLED is on, search is
+    # hybrid -- dense + BM25 keyword candidates fused (RRF) -- so exact terms
+    # (a formula, a named process) aren't lost to a purely semantic match.
+    QUIZ_KNOWLEDGE_DENSE_VECTOR_NAME: str = "dense"
+    QUIZ_KNOWLEDGE_SPARSE_VECTOR_NAME: str = "bm25"
+    RAG_HYBRID_SEARCH_ENABLED: bool = True
+    # Must match the model PDF-Ingestion-Backend-Service encoded the sparse
+    # vectors with (its SPARSE_MODEL).
+    RAG_SPARSE_MODEL: str = "Qdrant/bm25"
+    # Candidates each of the dense and sparse searches contributes before fusion.
+    RAG_HYBRID_PREFETCH_LIMIT: int = 40
+    # For a lesson, also search each of its curriculum subtopics on its own
+    # (up to this many), so its sections reach the candidate pool even when
+    # the lesson title alone doesn't find them ("Logic Gates with Boolean
+    # Functions" vs. a "Truth tables" section).
+    RAG_LESSON_SUBTOPIC_QUERIES: int = 6
+    # When the excerpts come from the lesson's own sections, keep at least
+    # this many (never more than requested) whatever the reranker scores --
+    # those sections are on-topic by their heading, and a broad lesson title
+    # ("Chemical basis of life") can make the reranker score real chapter
+    # text near zero, leaving the AI a single excerpt to cover a whole lesson.
+    RAG_LESSON_MIN_EXCERPTS: int = 3
     EMBEDDING_MODEL: str = "nomic-ai/nomic-embed-text-v1.5"
     EMBEDDING_DEVICE: str = "cpu"
     EMBEDDING_DIM: int = 768

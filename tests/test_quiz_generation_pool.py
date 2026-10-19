@@ -174,6 +174,31 @@ async def test_grounded_failure_retries_with_ai_without_excerpts(client, db_sess
     assert all(q["question"].startswith("Fresh AI") for q in resp.json()["questions"])
 
 
+async def test_short_grounded_batch_is_topped_up_by_plain_ai_before_the_pool(client, db_session, monkeypatch):
+    # Knowledge base + AI first, then AI without excerpts, and only then the pool.
+    await _seed_pool(db_session)
+    monkeypatch.setattr(
+        quiz_service.rag_service, "get_snippets_by_lesson", AsyncMock(return_value={"Fractions": ["an excerpt"]}),
+    )
+    calls = []
+
+    async def _side_effect(*, question_count, reference_snippets=None, reference_by_lesson=None, **_kwargs):
+        grounded = bool(reference_snippets or reference_by_lesson)
+        calls.append((grounded, question_count))
+        if grounded:
+            return [_fresh_question(0)]  # the textbook only supports one question
+        return [_fresh_question(100 + i) for i in range(question_count)]
+
+    with patch("app.services.quiz_service.generate_questions", new=AsyncMock(side_effect=_side_effect)):
+        resp = await client.post(GENERATE_URL, json={"subject": "Mathematics", "difficulty": "easy", "question_count": 3})
+
+    assert resp.status_code == 201
+    texts = [q["question"] for q in resp.json()["questions"]]
+    assert len(texts) == 3 and all(t.startswith("Fresh AI") for t in texts)  # no pool questions
+    assert calls[0][0] is True and (False, 2) in calls  # plain AI asked for exactly the shortfall
+    assert resp.json()["cache_hit"] is False
+
+
 async def test_pool_is_used_only_when_ai_fails(client, db_session):
     pool_texts = await _seed_pool(db_session)
 

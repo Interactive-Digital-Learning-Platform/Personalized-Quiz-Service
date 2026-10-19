@@ -8,12 +8,14 @@ from app.services import curriculum_service, source_labels
 from app.services.embedding_service import EmbeddingGenerator
 from app.services.rerank_service import RerankService
 from app.services.retrieval_service import RetrievalService
+from app.services.sparse_embedding_service import SparseEmbeddingGenerator
 
 logger = logging.getLogger(__name__)
 
 # Lazy module-level singletons -- mirrors the `_groq_client` singleton style already used in groq_service.py rather than introducing FastAPI app.state DI.
 _embedder: EmbeddingGenerator | None = None
 _reranker: RerankService | None = None
+_sparse_embedder: SparseEmbeddingGenerator | None = None
 _retrieval_service: RetrievalService | None = None
 # (grade, subject, lesson, max_snippets) -> (expires_at monotonic, results). Per process, like the singletons.
 _excerpt_cache: dict[tuple[int, str, str, int], tuple[float, list[SearchResult]]] = {}
@@ -24,12 +26,16 @@ def _is_available() -> bool:
 
 
 def _init_retrieval_service() -> RetrievalService:
-    global _embedder, _reranker, _retrieval_service
+    global _embedder, _reranker, _sparse_embedder, _retrieval_service
 
     if _retrieval_service is None:
         _embedder = _embedder or EmbeddingGenerator()
         _reranker = _reranker or RerankService()
-        _retrieval_service = RetrievalService(embedder=_embedder, reranker=_reranker)
+        if settings.RAG_HYBRID_SEARCH_ENABLED:
+            _sparse_embedder = _sparse_embedder or SparseEmbeddingGenerator()
+        _retrieval_service = RetrievalService(
+            embedder=_embedder, reranker=_reranker, sparse_embedder=_sparse_embedder,
+        )
 
     return _retrieval_service
 
@@ -94,10 +100,11 @@ async def retrieve_excerpts(
                 grade=grade,
                 subject=subject,
                 top_k=max_snippets,
-                # Chunk `lesson` tags use the curriculum's exact lesson names; a free-text lesson that isn't in
-                # the curriculum simply searches the whole subject.
+                # Matched against the chunks' section headings (the curriculum's exact lesson name plus its
+                # subtopics); a free-text lesson that isn't in the curriculum simply searches the whole subject.
                 lesson=curriculum_service.canonical_lesson(grade, subject, lesson),
                 keywords=curriculum_service.subtopics_for(grade, subject, lesson) or None,
+                subject_lessons=curriculum_service.lessons_for(grade, subject) or None,
             ),
             timeout=settings.RAG_TIMEOUT_SECONDS,
         )
